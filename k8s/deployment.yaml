@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ardent-intake-api
+  namespace: default
+  labels:
+    app: ardent-intake-api
+    version: v1
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ardent-intake-api
+  template:
+    metadata:
+      labels:
+        app: ardent-intake-api
+        version: v1
+    spec:
+      containers:
+        - name: ardent-intake-api
+          image: ardent-intake-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+              protocol: TCP
+          env:
+            # HMAC secret keys loaded from Kubernetes Secret
+            - name: HMAC_SECRET_KEY_PK_TEST_123
+              valueFrom:
+                secretKeyRef:
+                  name: ardent-intake-hmac-secret
+                  key: HMAC_SECRET_KEY_PK_TEST_123
+            - name: HMAC_SECRET_KEY_PK_TEST_456
+              valueFrom:
+                secretKeyRef:
+                  name: ardent-intake-hmac-secret
+                  key: HMAC_SECRET_KEY_PK_TEST_456
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+      restartPolicy: Always

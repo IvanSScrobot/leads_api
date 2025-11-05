@@ -1,0 +1,37 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ardent-intake-api
+  namespace: default
+  labels:
+    app: ardent-intake-api
+  annotations:
+    # Nginx ingress controller specific annotations
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # Rate limiting (optional - adjust as needed)
+    nginx.ingress.kubernetes.io/limit-rps: "100"
+    # Body size limit (64KB as per API spec)
+    nginx.ingress.kubernetes.io/proxy-body-size: "64k"
+    # Timeouts
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "30"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: ardent-intake.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ardent-intake-api
+                port:
+                  number: 80
+  # TLS configuration (optional - configure with your certificates)
+  # tls:
+  # - hosts:
+  #   - ardent-intake.example.com
+  #   secretName: ardent-intake-tls
