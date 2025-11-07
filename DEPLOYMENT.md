@@ -120,7 +120,7 @@ kubectl logs -l app=ardent-intake-api --tail=50 -f
 kubectl get ingress ardent-intake-api
 
 # Test health endpoint
-curl http://your-domain.com/health
+curl http://ardnt.io/v1/leads/health
 
 # Test with proper HMAC authentication
 python test_client.py
@@ -284,7 +284,7 @@ The deployment includes:
 - **Liveness probe**: Checks if the container is alive
 - **Readiness probe**: Checks if the pod is ready to receive traffic
 
-Both use the `/health` endpoint.
+Both use the `/v1/leads/health` endpoint.
 
 ### Logs
 

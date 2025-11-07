@@ -34,8 +34,8 @@ uvicorn main:app --reload
 ```
 
 The API will be available at:
-- **Intake Endpoint**: `POST http://localhost:8000/v1/intake/leads`
-- **Health Check**: `GET http://localhost:8000/health`
+- **Intake Endpoint**: `POST http://localhost:8000/api/v1/leads`
+- **Health Check**: `GET http://localhost:8000/v1/leads/health`
 
 ## API Usage
 
@@ -125,7 +125,7 @@ company_id = "cmp_123"
 
 # Request data
 method = "POST"
-path = "/v1/intake/leads"
+path = "//api/v1/leads"
 timestamp = str(int(time.time()))
 nonce = str(uuid.uuid4())
 payload = {"data": {"client_name": "Jane Doe"}}

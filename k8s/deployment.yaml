@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: ardent-intake-api
-          image: ardent-intake-api:latest
+          image: ivansscrobot/ardent-leads-api:0.3.1
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
@@ -46,7 +46,7 @@ spec:
               cpu: "500m"
           livenessProbe:
             httpGet:
-              path: /health
+              path: /api/v1/leads/health
               port: 8000
             initialDelaySeconds: 10
             periodSeconds: 30
@@ -54,7 +54,7 @@ spec:
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /health
+              path: /api/v1/leads/health
               port: 8000
             initialDelaySeconds: 5
             periodSeconds: 10

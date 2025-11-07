@@ -89,7 +89,7 @@ def make_signed_request(
 ):
     """Helper to create signed requests"""
     method = "POST"
-    path = "/v1/intake/leads"
+    path = "/api/v1/leads"
     
     if timestamp is None:
         timestamp = int(time.time())
@@ -142,7 +142,7 @@ class TestHealthEndpoint:
     
     def test_health_check(self):
         """Health endpoint should return 200"""
-        response = client.get("/health")
+        response = client.get("/api/v1/leads/health")
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"
@@ -236,7 +236,7 @@ class TestAuthenticationFailures:
     def test_missing_authorization_header(self):
         """Missing Authorization header should return 422"""
         response = client.post(
-            "/v1/intake/leads",
+            "//api/v1/leads",
             json={"data": {"email": "test@example.com"}},
             headers={"Content-Type": "application/json", "X-Ardent-Company": COMPANY_ID}
         )
@@ -249,7 +249,7 @@ class TestAuthenticationFailures:
         timestamp = str(int(time.time()))
         
         response = client.post(
-            "/v1/intake/leads",
+            "//api/v1/leads",
             json=payload,
             headers={
                 "Content-Type": "application/json",
@@ -261,7 +261,7 @@ class TestAuthenticationFailures:
     def test_malformed_authorization_header(self):
         """Malformed Authorization header should return 401"""
         response = client.post(
-            "/v1/intake/leads",
+            "//api/v1/leads",
             json={"data": {"email": "test@example.com"}},
             headers={
                 "Content-Type": "application/json",
@@ -320,7 +320,7 @@ class TestTimestampValidation:
         nonce = str(uuid.uuid4())
         
         response = client.post(
-            "/v1/intake/leads",
+            "//api/v1/leads",
             json=payload,
             headers={
                 "Content-Type": "application/json",

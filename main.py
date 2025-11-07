@@ -9,7 +9,6 @@ import logging
 import os
 import secrets
 import time
-import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -100,7 +99,7 @@ class InMemoryStore:
             }
         }
         
-        # Nonce cache: stores nonce -> expiry_timestamp for 24h
+        # Nonce cache: stores nonce -> expiry_timestamp for 2h
         self.nonce_cache: Dict[str, float] = {}
         
         # Idempotency store: idempotency_key -> {body_hash, submission_id}
@@ -363,7 +362,7 @@ async def verify_hmac_auth(
                 }
             )
         
-        # Check nonce replay (24h window)
+        # Check nonce replay (2h window)
         store.cleanup_expired_nonces()
         
         if nonce in store.nonce_cache:
@@ -380,8 +379,8 @@ async def verify_hmac_auth(
                 }
             )
         
-        # Store nonce with 24h expiry
-        store.nonce_cache[nonce] = time.time() + (24 * 60 * 60)
+        # Store nonce with 2h expiry
+        store.nonce_cache[nonce] = time.time() + (2 * 60 * 60)
         
         # Get request body (use cached version if available from middleware)
         if hasattr(request.state, 'cached_body'):
@@ -517,7 +516,7 @@ async def general_exception_handler(request: Request, exc: Exception):
 # ENDPOINTS
 # ============================================================================
 
-@app.post("/v1/intake/leads", response_model=IntakeResponse, status_code=status.HTTP_201_CREATED)
+@app.post("/api/v1/leads", response_model=IntakeResponse, status_code=status.HTTP_201_CREATED)
 async def intake_lead(
     request: Request,
     payload: IntakeRequest,
@@ -530,7 +529,7 @@ async def intake_lead(
     Security features:
     - HMAC-SHA256 signature verification
     - Timestamp validation (±300s)
-    - Nonce replay protection (24h)
+    - Nonce replay protection (2h)
     - Rate limiting (600 req/min per company)
     - Idempotency key support
     """
@@ -612,7 +611,7 @@ async def intake_lead(
     )
 
 
-@app.get("/health")
+@app.get("/api/v1/leads/health")
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "service": "ardent-intake-api", "version": "1.0.0"}

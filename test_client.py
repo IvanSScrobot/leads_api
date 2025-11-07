@@ -15,7 +15,8 @@ import httpx
 
 
 # Configuration
-API_BASE_URL = "http://localhost:8000"
+API_BASE_URL = "https://ardnt.io"
+# API_BASE_URL = "http://localhost:8000"
 PUBLIC_KEY = "pk_test_123"
 SECRET_KEY = "sk_test_secret_key_demo_only_change_in_prod"
 COMPANY_ID = "cmp_123"
@@ -99,7 +100,7 @@ def send_signed_request(
     """
     # Prepare request
     method = "POST"
-    path = "/v1/intake/leads"
+    path = "/api/v1/leads"
     url = f"{API_BASE_URL}{path}"
     
     # Generate timestamp and nonce if not provided
