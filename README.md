@@ -1,17 +1,19 @@
 # Ardent Intake API
 
-Production-grade FastAPI endpoint for secure lead ingestion with HMAC authentication, rate limiting, and replay protection.
+Production-grade FastAPI endpoint for HMAC-authenticated survey submission with PostgreSQL storage.
 
 ## Features
 
 - ✅ **HMAC-SHA256 Authentication** - Secure request signing with public/secret key pairs
 - ✅ **Timestamp Validation** - Only accepts requests within ±300 seconds
-- ✅ **Replay Protection** - Nonce-based prevention of replay attacks (24h cache)
+- ✅ **Replay Protection** - Nonce-based prevention (2h cache)
 - ✅ **Rate Limiting** - 600 requests per minute per company
-- ✅ **Idempotency** - Safe retry mechanism using Idempotency-Key header
-- ✅ **Multi-tenant Support** - Isolated company namespaces
-- ✅ **Structured Error Responses** - Consistent error format with request tracing
-- ✅ **Request Logging** - All requests logged with unique request IDs
+- ✅ **Idempotency** - Safe retry with Idempotency-Key header
+- ✅ **Multi-tenant Support** - Isolated company namespaces via HMAC keys
+- ✅ **PostgreSQL Storage** - All survey data stored in database
+- ✅ **Phone Validation** - Canadian focus with E.164 format, blocks premium/emergency numbers
+- ✅ **Automatic Retry** - 3 attempts with exponential backoff for database failures
+- ✅ **Mandatory Field Validation** - email, name, phoneNumber, businessType, privacyConsent
 
 ## Installation
 
@@ -24,6 +26,57 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+## Configuration
+
+### Environment Variables
+
+Create a `.env` file (see `.env.example`):
+
+```bash
+# HMAC Authentication (required)
+HMAC_SECRET_KEY_PK_TEST_123=sk_test_secret_key_demo_only_change_in_prod
+HMAC_SECRET_KEY_PK_TEST_456=sk_test_another_secret_key_for_testing
+
+# PostgreSQL (required)
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=ardent_survey
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=your_secure_password
+
+# Phone Validation
+INTERNATIONAL_NUMBERS_ALLOWED=false
+
+# Application
+PORT=8000
+```
+
+### Database Setup (Required)
+
+PostgreSQL database with the following schema:
+
+```sql
+-- Customers table
+CREATE TABLE customers (
+    id SERIAL PRIMARY KEY,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    name VARCHAR(255),
+    phone_number VARCHAR(50),
+    phone_number_validated BOOLEAN DEFAULT FALSE,
+    privacy_consent BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Survey responses table
+CREATE TABLE survey_responses (
+    id SERIAL PRIMARY KEY,
+    customer_id INTEGER REFERENCES customers(id),
+    survey_answers JSONB NOT NULL,
+    processed BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+```
+
 ## Running the API
 
 ```bash
@@ -33,17 +86,18 @@ uvicorn main:app --reload
 # Server will start at http://localhost:8000
 ```
 
-The API will be available at:
-- **Intake Endpoint**: `POST http://localhost:8000/api/v1/leads`
-- **Health Check**: `GET http://localhost:8000/v1/leads/health`
-
 ## API Usage
 
-### Authentication
+### Survey Submission Endpoint
 
-All requests must include HMAC-SHA256 authentication headers:
+**Endpoint:** `POST /api/v1/leads`
 
-**Required Headers:**
+All requests must include:
+1. **HMAC authentication headers** (see below)
+2. **All mandatory fields** in the request body
+
+### Required Headers
+
 ```
 Content-Type: application/json
 X-Ardent-Company: <company_id>
@@ -55,47 +109,103 @@ Authorization: Ardent-HMAC key=<public_key_id>, ts=<unix_timestamp>, nonce=<uuid
 Idempotency-Key: <unique_string>
 ```
 
-### Request Body
+### Request Body Format
 
 ```json
 {
-  "data": {
-    "client_name": "Jane Doe",
-    "client_email": "jane@example.com"
-  },
-  "context": {
-    "source_url": "https://partner.example.com/signup"
-  }
+  "email": "customer@example.com",
+  "name": "John Doe",
+  "phoneNumber": "+17786961321",
+  "businessType": "Retail",
+  "privacyConsent": true,
+  "employeeCount": "6-20",
+  "revenue": "$100,000 - $500,000",
+  "operationalFrustration": "Manual data entry",
+  "timeConsumingTasks": "Inventory management",
+  "inefficiencies": "Slow reporting",
+  "automationArea": "Sales process",
+  "oneTaskToAutomate": "Invoice generation",
+  "hoursToSave": "10-20 hours/week",
+  "growthObstacle": "Limited resources",
+  "importantOutcome": "Increased revenue"
 }
 ```
 
-The `data` field is required and must be a valid JSON object. The `context` field is optional.
+### Mandatory Fields
+
+- `email` - Valid email address (cannot be empty)
+- `name` - Customer name (cannot be empty)
+- `phoneNumber` - E.164 format (e.g., +12045551234)
+- `businessType` - Type of business (cannot be empty)
+- `privacyConsent` - Must be `true`
+
+All other fields are optional.
 
 ### Success Response (201 Created)
 
 ```json
 {
-  "submission_id": "sub_01HZXJ2V0J3WZ9G2FS3F40ZC5D",
+  "submission_id": "sub_abc123xyz",
   "company_id": "cmp_123",
-  "received_at": "2025-11-01T18:22:34Z",
+  "customer_id": 42,
+  "received_at": "2025-11-07T18:22:34Z",
   "status": "accepted"
 }
 ```
 
-### Error Response
+### Error Responses
 
+**400 Bad Request** (Missing/Invalid Field):
 ```json
 {
   "error": {
-    "code": "invalid_signature",
-    "message": "Signature verification failed",
-    "request_id": "req_cx2j8i8V2r",
+    "code": "validation_error",
+    "message": "Phone number is required and cannot be empty",
+    "request_id": "req_abc123",
     "retryable": false
   }
 }
 ```
 
-## HMAC Signature Generation
+**401 Unauthorized** (Invalid HMAC Signature):
+```json
+{
+  "error": {
+    "code": "invalid_signature",
+    "message": "Signature verification failed",
+    "request_id": "req_abc123",
+    "retryable": false
+  }
+}
+```
+
+**429 Too Many Requests** (Rate Limit):
+```json
+{
+  "error": {
+    "code": "rate_limit_exceeded",
+    "message": "Too many requests. Rate limit: 600 requests per minute",
+    "request_id": "req_abc123",
+    "retryable": true
+  }
+}
+```
+
+**503 Service Unavailable** (Database Not Available):
+```json
+{
+  "error": {
+    "code": "database_unavailable",
+    "message": "Database not configured or unavailable",
+    "request_id": "req_abc123",
+    "retryable": true
+  }
+}
+```
+
+## HMAC Authentication
+
+All requests must be authenticated using HMAC-SHA256 signatures.
 
 ### Canonical String Format
 
@@ -125,10 +235,16 @@ company_id = "cmp_123"
 
 # Request data
 method = "POST"
-path = "//api/v1/leads"
+path = "/api/v1/leads"
 timestamp = str(int(time.time()))
 nonce = str(uuid.uuid4())
-payload = {"data": {"client_name": "Jane Doe"}}
+payload = {
+    "email": "test@example.com",
+    "name": "Test User",
+    "phoneNumber": "+17786974255",
+    "businessType": "Technology",
+    "privacyConsent": True
+}
 body = json.dumps(payload)
 
 # Compute body hash
@@ -154,153 +270,212 @@ sig_b64 = base64.b64encode(signature).decode('utf-8')
 
 # Build Authorization header
 auth_header = f"Ardent-HMAC key={public_key}, ts={timestamp}, nonce={nonce}, sig={sig_b64}"
+
+print(f"Authorization: {auth_header}")
 ```
+
+## Phone Number Validation
+
+Phone numbers are validated with these rules:
+
+### Blocked Numbers
+- Premium rate (900, 976, 540 prefixes)
+- Emergency services (911, 999, 112, etc.)
+- Special services (411, 311, 211, etc.)
+- Toll-free numbers (800, 833, 844, 855, 866, 877, 888)
+
+### Accepted Formats
+- **US/Canada**: E.164 format `+1XXXXXXXXXX` (10 digits after +1)
+- **International**: Optional if `INTERNATIONAL_NUMBERS_ALLOWED=true`
+
+Phone validation results are logged. The `phone_number_validated` flag is set in the database.
+
+## Health Check
+
+**Endpoint:** `GET /api/v1/leads/health`
+
+```json
+{
+  "status": "healthy",
+  "service": "ardent-intake-api",
+  "version": "1.0.0",
+  "database": "connected"
+}
+```
+
+Status values:
+- `healthy` - All systems operational
+- `degraded` - Service running but database has issues
+- `unhealthy` - Critical failure (503 response)
+
+Database values:
+- `connected` - PostgreSQL accessible
+- `not_configured` - No database credentials provided
+- `error` - Database connection failed
 
 ## Testing
 
+### Test with Python
+
+```python
+import requests
+import base64
+import hashlib
+import hmac
+import json
+import time
+import uuid
+
+# Configuration
+url = "http://localhost:8000/api/v1/leads"
+secret_key = "sk_test_secret_key_demo_only_change_in_prod"
+public_key = "pk_test_123"
+company_id = "cmp_123"
+
+# Payload
+payload = {
+    "email": "test@example.com",
+    "name": "Test User",
+    "phoneNumber": "+17786974255",
+    "businessType": "Technology",
+    "privacyConsent": True
+}
+
+# Generate signature (see HMAC Authentication section above)
+method = "POST"
+path = "/api/v1/leads"
+timestamp = str(int(time.time()))
+nonce = str(uuid.uuid4())
+body = json.dumps(payload)
+body_hash = hashlib.sha256(body.encode('utf-8')).hexdigest()
+
+canonical = "\n".join([method, path, company_id, f"ts={timestamp}", f"nonce={nonce}", f"sha256={body_hash}"])
+signature = hmac.new(secret_key.encode('utf-8'), canonical.encode('utf-8'), hashlib.sha256).digest()
+sig_b64 = base64.b64encode(signature).decode('utf-8')
+
+# Make request
+headers = {
+    "Content-Type": "application/json",
+    "X-Ardent-Company": company_id,
+    "Authorization": f"Ardent-HMAC key={public_key}, ts={timestamp}, nonce={nonce}, sig={sig_b64}"
+}
+
+response = requests.post(url, json=payload, headers=headers)
+print(response.status_code)
+print(response.json())
+```
+
 ### Run Test Client
 
-The test client demonstrates all key scenarios:
-
 ```bash
-# Make sure the API is running first
 python test_client.py
 ```
 
-This will run 6 test scenarios:
-1. Valid signed request (success)
-2. Invalid signature (failure)
-3. Replay attack (rejected)
-4. Idempotency - same key, same body
-5. Idempotency conflict - same key, different body
-6. Stale timestamp (rejected)
-
-### Run Pytest Suite
+### Run Pytest
 
 ```bash
-# Run all tests
 pytest test_api.py -v
-
-# Run with coverage
-pytest test_api.py -v --cov=main
-
-# Run specific test class
-pytest test_api.py::TestAuthenticationSuccess -v
 ```
 
-Test coverage includes:
-- Authentication (success & failures)
-- Timestamp validation
-- Replay protection
-- Idempotency handling
-- Rate limiting
-- Payload validation
-- Multi-tenant isolation
-- Error handling
+## Kubernetes Deployment
 
-## Demo Credentials
+### Prerequisites
+1. Kubernetes cluster
+2. PostgreSQL database
 
-**Company 1:**
-- Public Key: `pk_test_123`
-- Secret Key: `sk_test_secret_key_demo_only_change_in_prod`
-- Company ID: `cmp_123`
+### Deploy
 
-**Company 2:**
-- Public Key: `pk_test_456`
-- Secret Key: `sk_test_another_secret_key_for_testing`
-- Company ID: `cmp_456`
+```bash
+# Apply Kubernetes manifests
+kubectl apply -f k8s/secret.yaml
+kubectl apply -f k8s/deployment.yaml
+kubectl apply -f k8s/service.yaml
+kubectl apply -f k8s/ingress.yaml
 
-⚠️ **Note:** These are demo credentials. In production, use secure key generation and storage.
+# Check status
+kubectl get pods -l app=ardent-intake-api
+kubectl logs -f deployment/ardent-intake-api
+```
 
-## Security Features
+### Configuration
 
-### HMAC Authentication
-- Uses HMAC-SHA256 for message authentication
-- Prevents tampering with request body
-- Constant-time signature comparison to prevent timing attacks
+Update `k8s/secret.yaml` with:
+1. HMAC secret keys (required)
+2. PostgreSQL credentials (required)
 
-### Timestamp Validation
-- Accepts only requests within ±300 seconds
-- Prevents replay of old requests
-- Helps synchronize client/server clocks
-
-### Nonce Replay Protection
-- Every nonce can only be used once
-- 24-hour cache window
-- Prevents exact replay attacks
-
-### Rate Limiting
-- 600 requests per minute per company
-- Simple in-memory counter
-- Returns 429 Too Many Requests when exceeded
-
-### Request Size Limits
-- Maximum payload size: 64KB
-- Prevents DoS attacks via large payloads
-
-### Idempotency
-- Same key + same body → returns original submission
-- Same key + different body → returns 409 Conflict
-- Prevents duplicate processing
+```bash
+# Encode secrets
+echo -n "your_password" | base64
+```
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Client Request                       │
-└────────────────────────┬────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│              Request ID Middleware                      │
-│              Body Size Validator                        │
-└────────────────────────┬────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│           HMAC Authentication Dependency                │
-│  ┌───────────────────────────────────────────────┐     │
-│  │ 1. Parse Authorization header                 │     │
-│  │ 2. Verify timestamp (±300s)                   │     │
-│  │ 3. Check nonce replay                         │     │
-│  │ 4. Validate company ID                        │     │
-│  │ 5. Compute & compare HMAC signature           │     │
-│  └───────────────────────────────────────────────┘     │
-└────────────────────────┬────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│                 Rate Limit Check                        │
-└────────────────────────┬────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│              Idempotency Handler                        │
-└────────────────────────┬────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│            Process & Store Submission                   │
-└────────────────────────┬────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│                 Return Response                         │
-└─────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│    POST /api/v1/leads (HMAC Auth Required)     │
+│                                                │
+│  ┌──────────────────────────────────────────┐ │
+│  │ 1. HMAC Signature Verification           │ │
+│  │ 2. Rate Limiting Check                   │ │
+│  │ 3. Idempotency Check                     │ │
+│  │ 4. Mandatory Field Validation            │ │
+│  │ 5. Phone Number Validation               │ │
+│  │ 6. PostgreSQL Storage (with 3x retry)    │ │
+│  │ 7. Return submission_id + customer_id    │ │
+│  └──────────────────────────────────────────┘ │
+│                                                │
+│         All survey data → PostgreSQL           │
+│     (customers + survey_responses tables)      │
+└────────────────────────────────────────────────┘
 ```
 
-## Production Considerations
+## Demo Credentials
 
-For production deployment, consider:
+**Company 1 (Test Provider 1):**
+- Public Key: `pk_test_123`
+- Secret Key: `sk_test_secret_key_demo_only_change_in_prod`
+- Company ID: `cmp_123`
 
-1. **Database** - Replace in-memory stores with Redis/PostgreSQL
-2. **Key Management** - Use secure key storage (e.g., AWS Secrets Manager, HashiCorp Vault)
-3. **Distributed Rate Limiting** - Use Redis for multi-instance rate limiting
-4. **Monitoring** - Add Prometheus metrics, distributed tracing
-5. **HTTPS** - Ensure TLS termination at load balancer
-6. **Logging** - Centralized logging (e.g., ELK stack, CloudWatch)
-7. **Key Rotation** - Implement key rotation strategy
-8. **Webhook/Queue** - Process submissions asynchronously
+**Company 2 (Test Provider 2):**
+- Public Key: `pk_test_456`
+- Secret Key: `sk_test_another_secret_key_for_testing`
+- Company ID: `cmp_456`
+
+⚠️ **Note:** These are demo credentials for beta testing. In production:
+- Each customer will have their own unique HMAC key
+- Keys will be securely generated and stored
+- Regular key rotation will be implemented
+
+## Security Features
+
+- **HMAC-SHA256** - Message authentication prevents tampering
+- **Timestamp Validation** - Prevents replay of old requests (±300s window)
+- **Nonce Cache** - Prevents exact replay attacks (2h cache)
+- **Rate Limiting** - 600 req/min per company
+- **Phone Validation** - Blocks premium/emergency numbers
+- **Input Sanitization** - Pydantic validation on all fields
+- **SQL Injection Protection** - Parameterized queries
+- **Constant-time Comparison** - Prevents timing attacks
+- **Request Size Limits** - 64KB maximum
+- **Database Retry** - 3 attempts with exponential backoff
+
+## Beta Version Notes
+
+This is a beta version with the following characteristics:
+
+1. **Trusted Providers**: Survey data comes from 1-2 trusted providers with HMAC keys
+2. **In-Memory Key Storage**: HMAC keys stored in-memory (will move to database in production)
+3. **Future Architecture**: One customer ID → One unique HMAC key (coming in v2.0)
+
+## Production Roadmap
+
+1. **Database Key Storage** - Move HMAC keys from in-memory to PostgreSQL
+2. **Customer-Key Mapping** - One customer → one unique HMAC key
+3. **Key Management API** - CRUD operations for HMAC keys
+4. **Key Rotation** - Automated rotation strategy
+5. **Monitoring** - Add Prometheus metrics, distributed tracing
+6. **Scaling** - Redis for distributed rate limiting
+7. **Backup** - Automated PostgreSQL backups
 
 ## License
 

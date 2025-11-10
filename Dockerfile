@@ -1,5 +1,5 @@
 # Multi-stage build for production-ready container
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
 
 # Set working directory
 WORKDIR /app
@@ -26,7 +26,7 @@ RUN useradd -m -u 1000 appuser
 COPY --from=builder /root/.local /home/appuser/.local
 
 # Copy application code
-COPY main.py .
+COPY *.py .
 
 # Set ownership
 RUN chown -R appuser:appuser /app /home/appuser/.local

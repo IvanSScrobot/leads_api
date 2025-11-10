@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: ardent-intake-api
-          image: ivansscrobot/ardent-leads-api:0.3.1
+          image: ivansscrobot/ardent-leads-api:0.4
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
@@ -37,6 +37,31 @@ spec:
                 secretKeyRef:
                   name: ardent-intake-hmac-secret
                   key: HMAC_SECRET_KEY_PK_TEST_456
+
+            # PostgreSQL database credentials for survey endpoint
+            - name: POSTGRES_HOST
+              value: "postgres-service" # This should match the service name for PostgreSQL
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_PASSWORD
+
+            # Optional: Phone validation configuration
+            - name: INTERNATIONAL_NUMBERS_ALLOWED
+              value: "false"
           resources:
             requests:
               memory: "128Mi"

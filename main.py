@@ -1,12 +1,14 @@
 """
 Ardent Intake API - Production-grade FastAPI endpoint for secure lead ingestion
 with HMAC authentication, rate limiting, and replay protection.
+EXTENDED: Survey submission with PostgreSQL integration and phone validation.
 """
 
 import hashlib
 import hmac
 import logging
 import os
+import re
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -15,7 +17,18 @@ from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Request, Response, Header, HTTPException, status, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, validator, EmailStr
+
+# Import database operations and phone validation
+# from db import (
+#     DatabaseOperations,
+#     PhoneValidator,
+#     db_pool,
+#     initialize_db_pool,
+#     close_db_pool
+# )
+import db
+from db import (DatabaseOperations, PhoneValidator)
 
 # Configure logging
 logging.basicConfig(
@@ -29,31 +42,51 @@ logger = logging.getLogger(__name__)
 # PYDANTIC MODELS
 # ============================================================================
 
-class LeadContext(BaseModel):
-    """Context information about the lead source"""
-    source_url: Optional[str] = None
+class SurveyRequest(BaseModel):
+    """Survey submission request model - required fields with arbitrary extras allowed"""
+    name: str = Field(..., min_length=1, max_length=255)
+    businessName: str = Field(..., alias='businessName', min_length=1, max_length=255)
+    email: EmailStr
+    phoneNumber: str = Field(..., alias='phoneNumber')
+    privacyConsent: bool = Field(..., alias='privacyConsent')
+    consentToUseAI: bool = Field(..., alias='consentToUseAI')
     
     class Config:
-        extra = "allow"
-
-
-class IntakeRequest(BaseModel):
-    """Request body for lead intake"""
-    data: Dict[str, Any] = Field(..., description="Lead data as JSON object")
-    context: Optional[LeadContext] = None
+        populate_by_name = True
+        extra = "allow"  # Allows arbitrary key-value pairs
     
-    @validator('data')
-    def validate_data(cls, v):
-        """Ensure data is a valid dict"""
-        if not isinstance(v, dict):
-            raise ValueError("data must be a JSON object")
+    @validator('email')
+    def validate_email(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Email is required and cannot be empty')
+        return v.strip().lower()
+    
+    @validator('name', 'businessName')
+    def validate_required_string(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Field is required and cannot be empty')
+        return v.strip()
+    
+    @validator('phoneNumber')
+    def validate_phone(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Phone number is required and cannot be empty')
+        if not re.match(r'^\+[1-9]\d{1,14}$', v.strip()):
+            raise ValueError('Phone number must be in E.164 format (e.g., +12125551234)')
+        return v.strip()
+    
+    @validator('privacyConsent', 'consentToUseAI')
+    def validate_consent(cls, v):
+        if not v:
+            raise ValueError('Consent is required')
         return v
 
 
 class IntakeResponse(BaseModel):
-    """Successful response for lead intake"""
+    """Successful response for survey submission"""
     submission_id: str
     company_id: str
+    customer_id: int
     received_at: str
     status: str = "accepted"
 
@@ -161,8 +194,15 @@ store = InMemoryStore()
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
     logger.info("Starting Ardent Intake API...")
+    
+    # Initialize database connection pool
+    db.initialize_db_pool()
+    
     yield
+    
+    # Shutdown
     logger.info("Shutting down Ardent Intake API...")
+    db.close_db_pool()
 
 
 # ============================================================================
@@ -519,12 +559,17 @@ async def general_exception_handler(request: Request, exc: Exception):
 @app.post("/api/v1/leads", response_model=IntakeResponse, status_code=status.HTTP_201_CREATED)
 async def intake_lead(
     request: Request,
-    payload: IntakeRequest,
+    survey: SurveyRequest,
     auth_info: Dict[str, str] = Depends(verify_hmac_auth),
     idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key")
 ):
     """
-    Ingest lead data from third-party websites with HMAC authentication
+    Submit survey data with HMAC authentication
+    
+    All mandatory fields must be provided:
+    - name, businessName, email, phoneNumber, privacyConsent, consentToUseAI
+    
+    Additional arbitrary key-value pairs are accepted.
     
     Security features:
     - HMAC-SHA256 signature verification
@@ -532,10 +577,33 @@ async def intake_lead(
     - Nonce replay protection (2h)
     - Rate limiting (600 req/min per company)
     - Idempotency key support
+    - Phone number validation (blocks premium/emergency numbers)
+    
+    Database:
+    - Stores in PostgreSQL (customers + survey_responses tables)
+    - Automatic retry (3 attempts) for transient failures
+    - Falls back to error if database unavailable
     """
     request_id = request.state.request_id
     company_id = auth_info["company_id"]
     body_hash = auth_info["body_hash"]
+    
+    logger.info(f"[{request_id}] Processing survey submission for company {company_id}")
+    
+    # Check database availability
+    if db.db_pool is None:
+        logger.error(f"[{request_id}] Database not available")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": {
+                    "code": "database_unavailable",
+                    "message": "Database not configured or unavailable",
+                    "request_id": request_id,
+                    "retryable": True
+                }
+            }
+        )
     
     # Check rate limit
     if not store.check_rate_limit(company_id):
@@ -578,18 +646,51 @@ async def intake_lead(
                     }
                 )
     
-    # Generate submission ID (ULID-like format for demo)
+    # Get user IP
+    user_ip = request.client.host if request.client else 'unknown'
+    
+    # Validate phone number
+    phone_validation = PhoneValidator.validate(survey.phoneNumber, user_ip)
+    phone_validated = phone_validation['validated']
+    
+    # Log security events
+    if phone_validation.get('log_security_event', False):
+        logger.warning(
+            f"[SECURITY_EVENT] Phone validation: {phone_validation['reason']} - "
+            f"Phone: {phone_validation['original_number']} - Risk: {phone_validation['risk_level']} - IP: {user_ip}"
+        )
+    
+    logger.info(f"[PHONE_VALIDATION] Result: {phone_validation}")
+    
+    # Insert into database with retry logic
+    try:
+        customer_id = DatabaseOperations.insert_customer_and_survey(survey, phone_validated)
+        logger.info(f"[{request_id}] Survey stored in PostgreSQL, customer_id: {customer_id}")
+    except Exception as db_error:
+        logger.error(f"[{request_id}] Database operation failed after retries: {str(db_error)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": {
+                    "code": "database_error",
+                    "message": "Failed to store survey data after retries",
+                    "request_id": request_id,
+                    "retryable": True
+                }
+            }
+        )
+    
+    # Generate submission ID
     submission_id = f"sub_{secrets.token_urlsafe(20)}"
     received_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     
-    # Store submission
+    # Store submission metadata in-memory for idempotency tracking
     submission_data = {
         "submission_id": submission_id,
         "company_id": company_id,
+        "customer_id": customer_id,
         "received_at": received_at,
-        "status": "accepted",
-        "data": payload.data,
-        "context": payload.context.dict() if payload.context else None
+        "status": "accepted"
     }
     
     store.submissions[submission_id] = submission_data
@@ -601,11 +702,12 @@ async def intake_lead(
             "submission_id": submission_id
         }
     
-    logger.info(f"[{request_id}] Lead accepted: {submission_id} for company {company_id}")
+    logger.info(f"[{request_id}] Survey accepted: {submission_id}, customer_id: {customer_id}, company: {company_id}")
     
     return IntakeResponse(
         submission_id=submission_id,
         company_id=company_id,
+        customer_id=customer_id,
         received_at=received_at,
         status="accepted"
     )
@@ -613,8 +715,49 @@ async def intake_lead(
 
 @app.get("/api/v1/leads/health")
 async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "service": "ardent-intake-api", "version": "1.0.0"}
+    """
+    Comprehensive health check endpoint
+    
+    Checks:
+    - Service status
+    - Database connection (if configured)
+    """
+    try:
+        health_status = {
+            "status": "healthy",
+            "service": "ardent-intake-api",
+            "version": "1.0.0"
+        }
+        
+        # Check database if available
+        if db.db_pool:
+            try:
+                conn = DatabaseOperations.get_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1")
+                cursor.close()
+                DatabaseOperations.release_connection(conn)
+                health_status["database"] = "connected"
+            except Exception as db_error:
+                logger.error(f"Database health check failed: {str(db_error)}")
+                health_status["database"] = "error"
+                health_status["status"] = "degraded"
+        else:
+            health_status["database"] = "not_configured"
+        
+        return health_status
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "status": "unhealthy",
+                "service": "ardent-intake-api",
+                "version": "1.0.0",
+                "error": str(e)
+            }
+        )
 
 
 if __name__ == "__main__":

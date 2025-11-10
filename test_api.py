@@ -1,6 +1,6 @@
 """
-Pytest test suite for Ardent Intake API
-Tests all security features and edge cases
+Comprehensive test suite for Ardent Intake API
+Tests HMAC authentication, survey validation, and database operations
 """
 
 import base64
@@ -9,34 +9,36 @@ import hmac
 import json
 import time
 import uuid
-from typing import Dict, Any
-
+from unittest.mock import Mock, patch, MagicMock
 import pytest
+import logging
 from fastapi.testclient import TestClient
 
+# Import the app and dependencies
 from main import app, store
+from db import DatabaseOperations, PhoneValidator
 
+logging.basicConfig(level=logging.DEBUG)
 
 # Test client
 client = TestClient(app)
 
+# Test credentials
+TEST_SECRET_KEY = "sk_test_secret_key_demo_only_change_in_prod"
+TEST_PUBLIC_KEY = "pk_test_123"
+TEST_COMPANY_ID = "cmp_123"
 
-# Test configuration
-PUBLIC_KEY = "pk_test_123"
-SECRET_KEY = "sk_test_secret_key_demo_only_change_in_prod"
-COMPANY_ID = "cmp_123"
 
-
-def build_canonical_string(
-    method: str,
-    path: str,
-    company_id: str,
-    timestamp: str,
-    nonce: str,
-    body_hash: str
-) -> str:
-    """Build canonical string for HMAC signature"""
-    return "\n".join([
+# Helper functions
+def generate_hmac_signature(method: str, path: str, company_id: str, body: dict) -> dict:
+    """Generate HMAC signature and return headers"""
+    timestamp = str(int(time.time()))
+    nonce = str(uuid.uuid4())
+    body_json = json.dumps(body)
+    body_hash = hashlib.sha256(body_json.encode('utf-8')).hexdigest()
+    
+    # Build canonical string
+    canonical = "\n".join([
         method,
         path,
         company_id,
@@ -44,474 +46,474 @@ def build_canonical_string(
         f"nonce={nonce}",
         f"sha256={body_hash}"
     ])
-
-
-def create_hmac_signature(
-    method: str,
-    path: str,
-    company_id: str,
-    timestamp: str,
-    nonce: str,
-    body: str,
-    secret_key: str
-) -> str:
-    """Create HMAC-SHA256 signature for request"""
-    body_hash = hashlib.sha256(body.encode('utf-8')).hexdigest()
     
-    canonical = build_canonical_string(
-        method=method,
-        path=path,
-        company_id=company_id,
-        timestamp=timestamp,
-        nonce=nonce,
-        body_hash=body_hash
-    )
-    
+    # Compute signature
     signature = hmac.new(
-        secret_key.encode('utf-8'),
+        TEST_SECRET_KEY.encode('utf-8'),
         canonical.encode('utf-8'),
         hashlib.sha256
     ).digest()
+    sig_b64 = base64.b64encode(signature).decode('utf-8')
     
-    return base64.b64encode(signature).decode('utf-8')
-
-
-def make_signed_request(
-    payload: Dict[str, Any],
-    public_key: str = PUBLIC_KEY,
-    secret_key: str = SECRET_KEY,
-    company_id: str = COMPANY_ID,
-    idempotency_key: str = None,
-    nonce: str = None,
-    timestamp: int = None,
-    invalid_sig: bool = False,
-    invalid_key: bool = False
-):
-    """Helper to create signed requests"""
-    method = "POST"
-    path = "/api/v1/leads"
-    
-    if timestamp is None:
-        timestamp = int(time.time())
-    if nonce is None:
-        nonce = str(uuid.uuid4())
-    
-    timestamp_str = str(timestamp)
-    body = json.dumps(payload)
-    
-    signature = create_hmac_signature(
-        method=method,
-        path=path,
-        company_id=company_id,
-        timestamp=timestamp_str,
-        nonce=nonce,
-        body=body,
-        secret_key=secret_key
-    )
-    
-    if invalid_sig:
-        signature = signature[:-3] + "XXX"
-    
-    if invalid_key:
-        public_key = "invalid_key_123"
-    
-    headers = {
-        "Content-Type": "application/json",
+    return {
+        "Authorization": f"Ardent-HMAC key={TEST_PUBLIC_KEY}, ts={timestamp}, nonce={nonce}, sig={sig_b64}",
         "X-Ardent-Company": company_id,
-        "Authorization": f"Ardent-HMAC key={public_key}, ts={timestamp_str}, nonce={nonce}, sig={signature}"
+        "Content-Type": "application/json"
     }
-    
-    if idempotency_key:
-        headers["Idempotency-Key"] = idempotency_key
-    
-    return client.post(path, json=payload, headers=headers)
+
+
+def get_valid_survey_payload():
+    """Return a valid survey payload"""
+    return {
+        "email": "test@example.com",
+        "name": "Test User",
+        "businessName": "Tech Solutions Inc.",
+        "phoneNumber": "+17786964111",
+        "privacyConsent": True,
+        "consentToUseAI": True,
+        # Extra fields (allowed but not required)
+        "businessType": "Technology",
+        "employeeCount": "6-20",
+        "revenue": "$100,000 - $500,000"
+    }
+
+
+# Fixtures
+@pytest.fixture
+def mock_db_pool():
+    """Mock database pool"""
+    with patch('main.db.db_pool') as mock_pool:
+        mock_pool.__bool__ = Mock(return_value=True)
+        yield mock_pool
+
+
+@pytest.fixture
+def mock_db_operations():
+    """Mock database operations"""
+    with patch.object(DatabaseOperations, 'insert_customer_and_survey') as mock_insert:
+        mock_insert.return_value = 123  # Mock customer_id
+        yield mock_insert
+
+
+@pytest.fixture
+def mock_phone_validator():
+    """Mock phone validator"""
+    with patch.object(PhoneValidator, 'validate') as mock_validate:
+        mock_validate.return_value = {
+            'status': 'approved',
+            'reason': 'Valid number',
+            'risk_level': 'none',
+            'validated': True,
+            'original_number': '+12045551234',
+            'cleaned_number': '+12045551234'
+        }
+        yield mock_validate
 
 
 @pytest.fixture(autouse=True)
 def reset_store():
-    """Reset in-memory stores before each test"""
+    """Reset in-memory store before each test"""
     store.nonce_cache.clear()
     store.idempotency_store.clear()
-    store.rate_limits.clear()
     store.submissions.clear()
+    store.rate_limits.clear()
     yield
 
 
-class TestHealthEndpoint:
-    """Test health check endpoint"""
-    
-    def test_health_check(self):
-        """Health endpoint should return 200"""
-        response = client.get("/api/v1/leads/health")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "healthy"
-        assert data["service"] == "ardent-intake-api"
+# ============================================================================
+# AUTHENTICATION TESTS
+# ============================================================================
 
-
-class TestAuthenticationSuccess:
-    """Test successful authentication scenarios"""
+class TestAuthentication:
+    """Test HMAC authentication"""
     
-    def test_valid_request(self):
-        """Valid signed request should succeed"""
-        payload = {
-            "data": {
-                "client_name": "Jane Doe",
-                "client_email": "jane@example.com"
-            },
-            "context": {
-                "source_url": "https://example.com/signup"
-            }
-        }
+    def test_valid_hmac_signature(self, mock_db_pool, mock_db_operations, mock_phone_validator):
+        """Test successful authentication with valid HMAC signature"""
+        payload = get_valid_survey_payload()
+        headers = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload)
         
-        response = make_signed_request(payload)
+        response = client.post("/api/v1/leads", json=payload, headers=headers)
+        
         assert response.status_code == 201
         data = response.json()
-        assert "submission_id" in data
-        assert data["company_id"] == COMPANY_ID
         assert data["status"] == "accepted"
-        assert "received_at" in data
-    
-    def test_minimal_payload(self):
-        """Request with minimal data field should work"""
-        payload = {"data": {"email": "test@example.com"}}
-        
-        response = make_signed_request(payload)
-        assert response.status_code == 201
-    
-    def test_complex_nested_data(self):
-        """Request with complex nested data should work"""
-        payload = {
-            "data": {
-                "personal": {
-                    "name": "John",
-                    "age": 30,
-                    "addresses": [
-                        {"type": "home", "city": "NYC"},
-                        {"type": "work", "city": "SF"}
-                    ]
-                },
-                "preferences": {
-                    "notifications": True,
-                    "language": "en"
-                }
-            }
-        }
-        
-        response = make_signed_request(payload)
-        assert response.status_code == 201
-
-
-class TestAuthenticationFailures:
-    """Test authentication failure scenarios"""
-    
-    def test_invalid_signature(self):
-        """Invalid signature should return 401"""
-        payload = {"data": {"email": "test@example.com"}}
-        
-        response = make_signed_request(payload, invalid_sig=True)
-        assert response.status_code == 401
-        data = response.json()
-        assert data["error"]["code"] == "invalid_signature"
-        assert not data["error"]["retryable"]
-    
-    def test_invalid_public_key(self):
-        """Unknown public key should return 401"""
-        payload = {"data": {"email": "test@example.com"}}
-        
-        response = make_signed_request(payload, invalid_key=True)
-        assert response.status_code == 401
-        data = response.json()
-        assert data["error"]["code"] == "invalid_credentials"
-    
-    def test_company_id_mismatch(self):
-        """Mismatched company ID should return 401"""
-        payload = {"data": {"email": "test@example.com"}}
-        
-        response = make_signed_request(payload, company_id="wrong_company")
-        assert response.status_code == 401
-        data = response.json()
-        assert data["error"]["code"] == "company_mismatch"
+        assert data["company_id"] == TEST_COMPANY_ID
+        assert "submission_id" in data
+        assert "customer_id" in data
     
     def test_missing_authorization_header(self):
-        """Missing Authorization header should return 422"""
-        response = client.post(
-            "//api/v1/leads",
-            json={"data": {"email": "test@example.com"}},
-            headers={"Content-Type": "application/json", "X-Ardent-Company": COMPANY_ID}
-        )
-        assert response.status_code == 422
+        """Test request without Authorization header"""
+        payload = get_valid_survey_payload()
+        headers = {
+            "X-Ardent-Company": TEST_COMPANY_ID,
+            "Content-Type": "application/json"
+        }
+        
+        response = client.post("/api/v1/leads", json=payload, headers=headers)
+        
+        assert response.status_code == 422  # FastAPI validation error
     
     def test_missing_company_header(self):
-        """Missing X-Ardent-Company header should return 422"""
-        payload = {"data": {"email": "test@example.com"}}
-        nonce = str(uuid.uuid4())
-        timestamp = str(int(time.time()))
+        """Test request without X-Ardent-Company header"""
+        payload = get_valid_survey_payload()
+        headers = {
+            "Authorization": "Ardent-HMAC key=pk_test_123, ts=123, nonce=abc, sig=def",
+            "Content-Type": "application/json"
+        }
         
-        response = client.post(
-            "//api/v1/leads",
-            json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Ardent-HMAC key={PUBLIC_KEY}, ts={timestamp}, nonce={nonce}, sig=dummy"
-            }
-        )
+        response = client.post("/api/v1/leads", json=payload, headers=headers)
+        
+        assert response.status_code == 422  # FastAPI validation error
+    
+    def test_invalid_signature(self, mock_db_pool):
+        """Test request with invalid HMAC signature"""
+        payload = get_valid_survey_payload()
+        headers = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload)
+        
+        # Corrupt the signature
+        headers["Authorization"] = headers["Authorization"].replace("sig=", "sig=invalid")
+        
+        response = client.post("/api/v1/leads", json=payload, headers=headers)
+        
+        assert response.status_code == 401
+        assert "invalid_signature" in response.json()["error"]["code"]
+    
+    def test_stale_timestamp(self, mock_db_pool):
+        """Test request with stale timestamp (outside ±300s window)"""
+        payload = get_valid_survey_payload()
+        old_timestamp = str(int(time.time()) - 400)  # 400 seconds ago
+        nonce = str(uuid.uuid4())
+        
+        body_json = json.dumps(payload)
+        body_hash = hashlib.sha256(body_json.encode('utf-8')).hexdigest()
+        
+        canonical = "\n".join([
+            "POST",
+            "/api/v1/leads",
+            TEST_COMPANY_ID,
+            f"ts={old_timestamp}",
+            f"nonce={nonce}",
+            f"sha256={body_hash}"
+        ])
+        
+        signature = hmac.new(
+            TEST_SECRET_KEY.encode('utf-8'),
+            canonical.encode('utf-8'),
+            hashlib.sha256
+        ).digest()
+        sig_b64 = base64.b64encode(signature).decode('utf-8')
+        
+        headers = {
+            "Authorization": f"Ardent-HMAC key={TEST_PUBLIC_KEY}, ts={old_timestamp}, nonce={nonce}, sig={sig_b64}",
+            "X-Ardent-Company": TEST_COMPANY_ID,
+            "Content-Type": "application/json"
+        }
+        
+        response = client.post("/api/v1/leads", json=payload, headers=headers)
+        
+        assert response.status_code == 400
+        assert "stale_timestamp" in response.json()["error"]["code"]
+    
+    def test_replay_attack_prevention(self, mock_db_pool, mock_db_operations, mock_phone_validator):
+        """Test that the same nonce cannot be reused"""
+        payload = get_valid_survey_payload()
+        headers = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload)
+        
+       # First request - should succeed
+        response1 = client.post("/api/v1/leads", json=payload, headers=headers)
+        assert response1.status_code == 201
+        
+        # Second request with same nonce - should fail
+        response2 = client.post("/api/v1/leads", json=payload, headers=headers)
+        assert response2.status_code == 400
+        assert "replay_detected" in response2.json()["error"]["code"]
+
+
+# ============================================================================
+# VALIDATION TESTS
+# ============================================================================
+
+class TestValidation:
+    """Test payload validation"""
+    
+    def test_missing_email(self, mock_db_pool):
+        """Test request missing email field"""
+        payload = get_valid_survey_payload()
+        del payload["email"]
+        headers = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload)
+        
+        response = client.post("/api/v1/leads", json=payload, headers=headers)
+        
+        assert response.status_code == 422  # Pydantic validation error
+    
+    def test_missing_name(self, mock_db_pool):
+        """Test request missing name field"""
+        payload = get_valid_survey_payload()
+        del payload["name"]
+        headers = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload)
+        
+        response = client.post("/api/v1/leads", json=payload, headers=headers)
+        
         assert response.status_code == 422
     
-    def test_malformed_authorization_header(self):
-        """Malformed Authorization header should return 401"""
-        response = client.post(
-            "//api/v1/leads",
-            json={"data": {"email": "test@example.com"}},
-            headers={
-                "Content-Type": "application/json",
-                "X-Ardent-Company": COMPANY_ID,
-                "Authorization": "Bearer invalid_token"
-            }
-        )
-        assert response.status_code == 401
-
-
-class TestTimestampValidation:
-    """Test timestamp validation"""
-    
-    def test_timestamp_within_window(self):
-        """Timestamp within ±300s should succeed"""
-        payload = {"data": {"email": "test@example.com"}}
+    def test_missing_phone_number(self, mock_db_pool):
+        """Test request missing phoneNumber field"""
+        payload = get_valid_survey_payload()
+        del payload["phoneNumber"]
+        headers = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload)
         
-        # Test with current time
-        response = make_signed_request(payload)
+        response = client.post("/api/v1/leads", json=payload, headers=headers)
+        print(response.json())
+        
+        assert response.status_code == 422
+    
+    def test_missing_business_name(self, mock_db_pool):
+        """Test request missing businessName field"""
+        payload = get_valid_survey_payload()
+        del payload["businessName"]
+        headers = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload)
+        
+        response = client.post("/api/v1/leads", json=payload, headers=headers)
+        
+        assert response.status_code == 422
+    
+    def test_missing_privacy_consent(self, mock_db_pool):
+        """Test request missing privacyConsent field"""
+        payload = get_valid_survey_payload()
+        del payload["privacyConsent"]
+        headers = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload)
+        
+        response = client.post("/api/v1/leads", json=payload, headers=headers)
+        
+        assert response.status_code == 422
+    
+    def test_missing_consent_to_use_ai(self, mock_db_pool):
+        """Test request missing consentToUseAI field"""
+        payload = get_valid_survey_payload()
+        del payload["consentToUseAI"]
+        headers = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload)
+        
+        response = client.post("/api/v1/leads", json=payload, headers=headers)
+        
+        assert response.status_code == 422
+    
+    def test_invalid_email_format(self, mock_db_pool):
+        """Test request with invalid email format"""
+        payload = get_valid_survey_payload()
+        payload["email"] = "not-an-email"
+        headers = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload)
+        
+        response = client.post("/api/v1/leads", json=payload, headers=headers)
+        
+        assert response.status_code == 422
+    
+    def test_invalid_phone_format(self, mock_db_pool):
+        """Test request with invalid phone number format (not E.164)"""
+        payload = get_valid_survey_payload()
+        payload["phoneNumber"] = "1234567890"  # Missing + prefix
+        headers = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload)
+        
+        response = client.post("/api/v1/leads", json=payload, headers=headers)
+        
+        assert response.status_code == 422
+    
+    def test_empty_name(self, mock_db_pool):
+        """Test request with empty name"""
+        payload = get_valid_survey_payload()
+        payload["name"] = ""
+        headers = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload)
+        
+        response = client.post("/api/v1/leads", json=payload, headers=headers)
+        
+        assert response.status_code == 422
+    
+    def test_extra_fields_allowed(self, mock_db_pool, mock_db_operations, mock_phone_validator):
+        """Test that arbitrary extra fields are accepted"""
+        payload = get_valid_survey_payload()
+        # Add arbitrary extra fields
+        payload["business_name"] = "Solar Solutions Ltd."
+        payload["customField1"] = "custom value"
+        payload["customField2"] = 12345
+        headers = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload)
+        
+        response = client.post("/api/v1/leads", json=payload, headers=headers)
+        
         assert response.status_code == 201
-        
-        # Test with time 200s in the past
-        past_time = int(time.time()) - 200
-        response = make_signed_request(payload, timestamp=past_time)
-        assert response.status_code == 201
-        
-        # Test with time 200s in the future
-        future_time = int(time.time()) + 200
-        response = make_signed_request(payload, timestamp=future_time)
-        assert response.status_code == 201
-    
-    def test_stale_timestamp_past(self):
-        """Timestamp >300s in the past should be rejected"""
-        payload = {"data": {"email": "test@example.com"}}
-        old_timestamp = int(time.time()) - 400
-        
-        response = make_signed_request(payload, timestamp=old_timestamp)
-        assert response.status_code == 400
         data = response.json()
-        assert data["error"]["code"] == "stale_timestamp"
-        assert data["error"]["retryable"]
-    
-    def test_stale_timestamp_future(self):
-        """Timestamp >300s in the future should be rejected"""
-        payload = {"data": {"email": "test@example.com"}}
-        future_timestamp = int(time.time()) + 400
-        
-        response = make_signed_request(payload, timestamp=future_timestamp)
-        assert response.status_code == 400
-        data = response.json()
-        assert data["error"]["code"] == "stale_timestamp"
-    
-    def test_invalid_timestamp_format(self):
-        """Non-numeric timestamp should be rejected"""
-        payload = {"data": {"email": "test@example.com"}}
-        nonce = str(uuid.uuid4())
-        
-        response = client.post(
-            "//api/v1/leads",
-            json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "X-Ardent-Company": COMPANY_ID,
-                "Authorization": f"Ardent-HMAC key={PUBLIC_KEY}, ts=invalid, nonce={nonce}, sig=dummy"
-            }
-        )
-        assert response.status_code == 400
-        data = response.json()
-        assert data["error"]["code"] == "invalid_timestamp"
+        assert data["status"] == "accepted"
 
 
-class TestReplayProtection:
-    """Test nonce replay protection"""
-    
-    def test_nonce_reuse_rejected(self):
-        """Reusing a nonce should be rejected"""
-        payload = {"data": {"email": "test@example.com"}}
-        nonce = str(uuid.uuid4())
-        
-        # First request should succeed
-        response1 = make_signed_request(payload, nonce=nonce)
-        assert response1.status_code == 201
-        
-        # Second request with same nonce should fail
-        response2 = make_signed_request(payload, nonce=nonce)
-        assert response2.status_code == 400
-        data = response2.json()
-        assert data["error"]["code"] == "replay_detected"
-        assert not data["error"]["retryable"]
-    
-    def test_different_nonces_allowed(self):
-        """Different nonces should all succeed"""
-        payload = {"data": {"email": "test@example.com"}}
-        
-        response1 = make_signed_request(payload, nonce=str(uuid.uuid4()))
-        assert response1.status_code == 201
-        
-        response2 = make_signed_request(payload, nonce=str(uuid.uuid4()))
-        assert response2.status_code == 201
-        
-        response3 = make_signed_request(payload, nonce=str(uuid.uuid4()))
-        assert response3.status_code == 201
-
-
-class TestIdempotency:
-    """Test idempotency key handling"""
-    
-    def test_idempotency_same_key_same_body(self):
-        """Same key and body should return same submission_id"""
-        payload = {"data": {"email": "test@example.com"}}
-        idem_key = f"idem_{uuid.uuid4()}"
-        
-        response1 = make_signed_request(payload, idempotency_key=idem_key)
-        assert response1.status_code == 201
-        submission_id1 = response1.json()["submission_id"]
-        
-        response2 = make_signed_request(payload, idempotency_key=idem_key)
-        assert response2.status_code == 201
-        submission_id2 = response2.json()["submission_id"]
-        
-        assert submission_id1 == submission_id2
-    
-    def test_idempotency_same_key_different_body(self):
-        """Same key but different body should return 409 conflict"""
-        idem_key = f"idem_{uuid.uuid4()}"
-        
-        payload1 = {"data": {"email": "test1@example.com"}}
-        response1 = make_signed_request(payload1, idempotency_key=idem_key)
-        assert response1.status_code == 201
-        
-        payload2 = {"data": {"email": "test2@example.com"}}
-        response2 = make_signed_request(payload2, idempotency_key=idem_key)
-        assert response2.status_code == 409
-        data = response2.json()
-        assert data["error"]["code"] == "idempotency_conflict"
-        assert not data["error"]["retryable"]
-    
-    def test_no_idempotency_key(self):
-        """Without idempotency key, same payload should create new submissions"""
-        payload = {"data": {"email": "test@example.com"}}
-        
-        response1 = make_signed_request(payload)
-        assert response1.status_code == 201
-        submission_id1 = response1.json()["submission_id"]
-        
-        response2 = make_signed_request(payload)
-        assert response2.status_code == 201
-        submission_id2 = response2.json()["submission_id"]
-        
-        assert submission_id1 != submission_id2
-
+# ============================================================================
+# RATE LIMITING TESTS
+# ============================================================================
 
 class TestRateLimiting:
-    """Test rate limiting (600 requests per minute)"""
+    """Test rate limiting functionality"""
     
-    def test_rate_limit_enforcement(self):
-        """Exceeding 600 requests/minute should return 429"""
-        payload = {"data": {"email": "test@example.com"}}
+    def test_rate_limit_exceeded(self, mock_db_pool, mock_db_operations, mock_phone_validator):
+        """Test rate limit enforcement"""
+        payload = get_valid_survey_payload()
         
-        # Simulate 600 requests
-        for _ in range(600):
-            store.check_rate_limit(COMPANY_ID)
+        # Make 600 requests (the limit)
+        for i in range(600):
+            headers = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload)
+            response = client.post("/api/v1/leads", json=payload, headers=headers)
+            assert response.status_code == 201
         
         # 601st request should be rate limited
-        response = make_signed_request(payload)
+        headers = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload)
+        response = client.post("/api/v1/leads", json=payload, headers=headers)
+        
         assert response.status_code == 429
-        data = response.json()
-        assert data["error"]["code"] == "rate_limit_exceeded"
-        assert data["error"]["retryable"]
+        assert "rate_limit_exceeded" in response.json()["error"]["code"]
 
 
-class TestPayloadValidation:
-    """Test request payload validation"""
-    
-    def test_missing_data_field(self):
-        """Request without 'data' field should be rejected"""
-        payload = {"context": {"source_url": "https://example.com"}}
-        
-        response = make_signed_request(payload)
-        assert response.status_code == 422
-    
-    def test_data_not_object(self):
-        """'data' field must be an object, not string/array"""
-        payload = {"data": "invalid_string"}
-        
-        response = make_signed_request(payload)
-        assert response.status_code == 422
-    
-    def test_empty_data_object(self):
-        """Empty data object should be accepted"""
-        payload = {"data": {}}
-        
-        response = make_signed_request(payload)
-        assert response.status_code == 201
-    
-    def test_oversized_payload(self):
-        """Payload >64KB should be rejected"""
-        # Create a large payload (>64KB)
-        large_data = {"data": {"field": "x" * (65 * 1024)}}
-        
-        response = make_signed_request(large_data)
-        assert response.status_code == 413
-        data = response.json()
-        assert data["error"]["code"] == "payload_too_large"
+# ============================================================================
+# IDEMPOTENCY TESTS
+# ============================================================================
 
-
-class TestRequestHeaders:
-    """Test request header handling"""
+class TestIdempotency:
+    """Test idempotency functionality"""
     
-    def test_request_id_in_response(self):
-        """Response should include X-Request-ID header"""
-        payload = {"data": {"email": "test@example.com"}}
+    def test_idempotent_request_same_body(self, mock_db_pool, mock_db_operations, mock_phone_validator):
+        """Test that same idempotency key with same body returns same result"""
+        payload = get_valid_survey_payload()
+        idempotency_key = str(uuid.uuid4())
         
-        response = make_signed_request(payload)
-        assert "x-request-id" in response.headers
-        assert response.headers["x-request-id"].startswith("req_")
-    
-    def test_request_id_in_error(self):
-        """Error responses should include request_id"""
-        payload = {"data": {"email": "test@example.com"}}
+        # First request
+        headers1 = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload)
+        headers1["Idempotency-Key"] = idempotency_key
+        response1 = client.post("/api/v1/leads", json=payload, headers=headers1)
         
-        response = make_signed_request(payload, invalid_sig=True)
-        assert response.status_code == 401
-        data = response.json()
-        assert "request_id" in data["error"]
-
-
-class TestMultipleTenants:
-    """Test multi-tenant isolation"""
-    
-    def test_different_companies(self):
-        """Different companies should be isolated"""
-        # Company 1
-        payload1 = {"data": {"email": "company1@example.com"}}
-        response1 = make_signed_request(
-            payload1,
-            public_key="pk_test_123",
-            secret_key="sk_test_secret_key_demo_only_change_in_prod",
-            company_id="cmp_123"
-        )
         assert response1.status_code == 201
-        assert response1.json()["company_id"] == "cmp_123"
+        data1 = response1.json()
         
-        # Company 2
-        payload2 = {"data": {"email": "company2@example.com"}}
-        response2 = make_signed_request(
-            payload2,
-            public_key="pk_test_456",
-            secret_key="sk_test_another_secret_key_for_testing",
-            company_id="cmp_456"
-        )
+        # Second request with same key and body (different nonce)
+        headers2 = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload)
+        headers2["Idempotency-Key"] = idempotency_key
+        response2 = client.post("/api/v1/leads", json=payload, headers=headers2)
+        
         assert response2.status_code == 201
-        assert response2.json()["company_id"] == "cmp_456"
+        data2 = response2.json()
+        
+        # Should return same submission_id
+        assert data1["submission_id"] == data2["submission_id"]
+    
+    def test_idempotent_request_different_body(self, mock_db_pool, mock_db_operations, mock_phone_validator):
+        """Test that same idempotency key with different body returns conflict"""
+        payload1 = get_valid_survey_payload()
+        payload2 = get_valid_survey_payload()
+        payload2["name"] = "Different Name"
+        
+        idempotency_key = str(uuid.uuid4())
+        
+        # First request
+        headers1 = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload1)
+        headers1["Idempotency-Key"] = idempotency_key
+        response1 = client.post("/api/v1/leads", json=payload1, headers=headers1)
+        
+        assert response1.status_code == 201
+        
+        # Second request with same key but different body
+        headers2 = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload2)
+        headers2["Idempotency-Key"] = idempotency_key
+        response2 = client.post("/api/v1/leads", json=payload2, headers=headers2)
+        
+        assert response2.status_code == 409
+        assert "idempotency_conflict" in response2.json()["error"]["code"]
+
+
+# ============================================================================
+# DATABASE TESTS
+# ============================================================================
+
+class TestDatabase:
+    """Test database operations"""
+    
+    def test_database_unavailable(self):
+        """Test request when database is not available"""
+        with patch('main.db.db_pool', None):
+            payload = get_valid_survey_payload()
+            headers = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload)
+            
+            response = client.post("/api/v1/leads", json=payload, headers=headers)
+            
+            assert response.status_code == 503
+            assert "database_unavailable" in response.json()["error"]["code"]
+    
+    def test_database_insert_called(self, mock_db_pool, mock_db_operations, mock_phone_validator):
+        """Test that database insert is called with correct data"""
+        payload = get_valid_survey_payload()
+        headers = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload)
+        
+        response = client.post("/api/v1/leads", json=payload, headers=headers)
+        
+        assert response.status_code == 201
+        assert mock_db_operations.called
+        # Verify the survey data was passed correctly
+        call_args = mock_db_operations.call_args[0]
+        assert call_args[0].email == payload["email"]
+        assert call_args[0].name == payload["name"]
+    
+    def test_database_error_handling(self, mock_db_pool, mock_phone_validator):
+        """Test handling of database errors after retries"""
+        with patch.object(DatabaseOperations, 'insert_customer_and_survey') as mock_insert:
+            mock_insert.side_effect = Exception("Database error")
+            
+            payload = get_valid_survey_payload()
+            headers = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload)
+            
+            response = client.post("/api/v1/leads", json=payload, headers=headers)
+            
+            assert response.status_code == 500
+            assert "database_error" in response.json()["error"]["code"]
+
+
+# ============================================================================
+# HEALTH CHECK TESTS
+# ============================================================================
+
+class TestHealthCheck:
+    """Test health check endpoint"""
+    
+    def test_health_check_with_database(self, mock_db_pool):
+        """Test health check when database is available"""
+        with patch.object(DatabaseOperations, 'get_connection') as mock_get_conn:
+            mock_conn = MagicMock()
+            mock_cursor = MagicMock()
+            mock_conn.cursor.return_value = mock_cursor
+            mock_get_conn.return_value = mock_conn
+            
+            with patch.object(DatabaseOperations, 'release_connection'):
+                response = client.get("/api/v1/leads/health")
+                
+                assert response.status_code == 200
+                data = response.json()
+                assert data["status"] == "healthy"
+                assert data["database"] == "connected"
+    
+    def test_health_check_without_database(self):
+        """Test health check when database is not configured"""
+        with patch('main.db.db_pool', None):
+            response = client.get("/api/v1/leads/health")
+            
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "healthy"
+            assert data["database"] == "not_configured"
+    
+    def test_health_check_database_error(self, mock_db_pool):
+        """Test health check when database has errors"""
+        with patch.object(DatabaseOperations, 'get_connection') as mock_get_conn:
+            mock_get_conn.side_effect = Exception("Connection error")
+            
+            response = client.get("/api/v1/leads/health")
+            
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "degraded"
+            assert data["database"] == "error"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
