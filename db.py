@@ -1,15 +1,17 @@
 """
-Database configuration, phone validation, and operations for Ardent Survey API
+Database configuration and operations for Ardent Survey API
 """
 
 import logging
 import os
-import re
 import time
 from typing import Any, Dict, Optional
 
 import psycopg2
 from psycopg2 import pool, extras, Error
+
+# Import PhoneValidator from dedicated module
+from PhoneValidator import PhoneValidator
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -35,130 +37,6 @@ class DatabaseConfig:
 # Global database connection pool
 db_config = DatabaseConfig()
 db_pool: Optional[pool.ThreadedConnectionPool] = None
-
-
-# ============================================================================
-# PHONE NUMBER VALIDATION
-# ============================================================================
-
-class PhoneValidator:
-    """Phone number validation with Canadian focus"""
-    
-    VALID_CANADIAN_AREA_CODES = [
-        '403', '587', '780', '825',  # Alberta
-        '236', '250', '604', '672', '778',  # British Columbia
-        '204', '431',  # Manitoba
-        '506',  # New Brunswick
-        '709',  # Newfoundland and Labrador
-        '867',  # NWT/Nunavut/Yukon
-        '782', '902',  # Nova Scotia/PEI
-        '226', '249', '289', '343', '365', '416', '437', '519', '548',  # Ontario
-        '613', '647', '705', '807', '905',  # Ontario cont.
-        '367', '418', '438', '450', '514', '579', '581', '819', '873',  # Quebec
-        '306', '639',  # Saskatchewan
-    ]
-    
-    PREMIUM_PREFIXES = ['900', '976', '540']
-    SPECIAL_SERVICE_NUMBERS = ['911', '999', '112', '000', '110', '411', '311', '211', '511', '611', '711', '811']
-    TOLL_FREE_PREFIXES = ['800', '833', '844', '855', '866', '877', '888']
-    
-    @staticmethod
-    def clean_phone_number(phone: str) -> str:
-        """Remove all non-digit characters except +"""
-        if not phone or not isinstance(phone, str):
-            return ''
-        return re.sub(r'[^\d+]', '', phone).strip()
-    
-    @staticmethod
-    def validate(phone: str, user_ip: str = 'unknown') -> Dict[str, Any]:
-        """Validate phone number with comprehensive checks"""
-        cleaned = PhoneValidator.clean_phone_number(phone)
-        logger.info(f"[PHONE_VALIDATION] Validating: {phone} -> {cleaned}, IP: {user_ip}")
-        
-        if not cleaned or len(cleaned) < 7:
-            return {
-                'status': 'rejected',
-                'reason': 'Invalid phone number format',
-                'risk_level': 'medium',
-                'validated': False,
-                'original_number': phone,
-                'cleaned_number': cleaned
-            }
-        
-        # Blocked patterns
-        blocked_patterns = [
-            r'^(\+?1)?900\d{7}$', r'^(\+?1)?976\d{7}$', r'^(\+?1)?540\d{7}$',
-            r'^\+90[0-9]\d+$', r'^0+$', r'^1+$', r'^\d{1,5}$', r'^\d{16,}$'
-        ]
-        
-        for pattern in blocked_patterns:
-            if re.match(pattern, cleaned):
-                return {
-                    'status': 'rejected',
-                    'reason': 'Blocked pattern - potential premium/restricted',
-                    'risk_level': 'high',
-                    'validated': False,
-                    'original_number': phone,
-                    'cleaned_number': cleaned
-                }
-        
-        # Emergency/special service
-        for special in PhoneValidator.SPECIAL_SERVICE_NUMBERS:
-            if special in cleaned:
-                return {
-                    'status': 'rejected',
-                    'reason': 'Emergency/special service numbers not accepted',
-                    'risk_level': 'high',
-                    'validated': False,
-                    'original_number': phone,
-                    'cleaned_number': cleaned
-                }
-        
-        # US/Canada format
-        if re.match(r'^(\+?1)?[2-9]\d{2}[2-9]\d{2}\d{4}$', cleaned):
-            area_code = cleaned[2:5] if cleaned.startswith('+1') else (
-                cleaned[1:4] if cleaned.startswith('1') else cleaned[:3]
-            )
-            
-            if area_code in PhoneValidator.TOLL_FREE_PREFIXES:
-                return {
-                    'status': 'rejected',
-                    'reason': 'Toll-free numbers not accepted',
-                    'risk_level': 'medium',
-                    'validated': False,
-                    'original_number': phone,
-                    'cleaned_number': cleaned
-                }
-            
-            return {
-                'status': 'approved',
-                'reason': 'Standard business number',
-                'risk_level': 'none',
-                'validated': True,
-                'original_number': phone,
-                'cleaned_number': cleaned
-            }
-        
-        # International (if enabled)
-        if os.getenv('INTERNATIONAL_NUMBERS_ALLOWED', 'false').lower() == 'true':
-            if re.match(r'^\+(?!90[0-9])[1-9]\d{6,14}$', cleaned):
-                return {
-                    'status': 'approved',
-                    'reason': 'Valid international number',
-                    'risk_level': 'none',
-                    'validated': True,
-                    'original_number': phone,
-                    'cleaned_number': cleaned
-                }
-        
-        return {
-            'status': 'rejected',
-            'reason': 'Unverified number format',
-            'risk_level': 'medium',
-            'validated': False,
-            'original_number': phone,
-            'cleaned_number': cleaned
-        }
 
 
 # ============================================================================
@@ -293,6 +171,128 @@ class DatabaseOperations:
                     logger.debug("Database connection released")
         
         return DatabaseOperations.retry_operation(_perform_insert, max_retries=3)
+    
+    @staticmethod
+    def get_lead_status(company_id: str, submission_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve call_summary and processed status from survey_responses table
+        
+        Args:
+            company_id: Company identifier
+            submission_id: Unique submission identifier
+        
+        Returns:
+            Dictionary with call_summary and processed status, or None if not found
+        """
+        def _perform_query():
+            conn = None
+            try:
+                conn = DatabaseOperations.get_connection()
+                with conn.cursor(cursor_factory=extras.RealDictCursor) as cursor:
+                    cursor.execute("""
+                        SELECT call_summary, processed
+                        FROM survey_responses
+                        WHERE company_id = %s AND submission_id = %s
+                    """, (company_id, submission_id))
+                    
+                    result = cursor.fetchone()
+                    if result:
+                        return dict(result)
+                    return None
+            
+            finally:
+                if conn:
+                    DatabaseOperations.release_connection(conn)
+        
+        return DatabaseOperations.retry_operation(_perform_query, max_retries=3)
+    
+    @staticmethod
+    def get_api_key_by_public_key(public_key: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve API key information by public key with company validation
+        
+        Args:
+            public_key: Public key identifier
+        
+        Returns:
+            Dictionary with api_key and company info, or None if not found/invalid
+            Returns: {
+                'api_key_id': int,
+                'public_key': str,
+                'secret_key': str,
+                'api_key_active': bool,
+                'api_key_expires_at': datetime or None,
+                'company_id': int,
+                'company_name': str,
+                'company_active': bool
+            }
+        """
+        def _perform_query():
+            conn = None
+            try:
+                conn = DatabaseOperations.get_connection()
+                with conn.cursor(cursor_factory=extras.RealDictCursor) as cursor:
+                    cursor.execute("""
+                        SELECT
+                            ak.id as api_key_id,
+                            ak.public_key,
+                            ak.secret_key,
+                            ak.active as api_key_active,
+                            ak.expires_at as api_key_expires_at,
+                            c.id as company_id,
+                            c.name as company_name,
+                            c.active as company_active
+                        FROM api_keys ak
+                        INNER JOIN companies c ON ak.company_id = c.id
+                        WHERE ak.public_key = %s
+                    """, (public_key,))
+                    
+                    result = cursor.fetchone()
+                    if result:
+                        return dict(result)
+                    return None
+            
+            finally:
+                if conn:
+                    DatabaseOperations.release_connection(conn)
+        
+        return DatabaseOperations.retry_operation(_perform_query, max_retries=3)
+    
+    @staticmethod
+    def update_api_key_last_used(api_key_id: int) -> bool:
+        """
+        Update the last_used_at timestamp for an API key
+        
+        Args:
+            api_key_id: API key ID
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        def _perform_update():
+            conn = None
+            try:
+                conn = DatabaseOperations.get_connection()
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        UPDATE api_keys
+                        SET last_used_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                    """, (api_key_id,))
+                    conn.commit()
+                    return True
+            
+            except Exception as e:
+                logger.error(f"Failed to update last_used_at for api_key_id={api_key_id}: {str(e)}")
+                if conn:
+                    conn.rollback()
+                return False
+            
+            finally:
+                if conn:
+                    DatabaseOperations.release_connection(conn)
+        
+        return DatabaseOperations.retry_operation(_perform_update, max_retries=2)
 
 
 # ============================================================================

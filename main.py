@@ -16,19 +16,31 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Request, Response, Header, HTTPException, status, Depends
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, validator, EmailStr
+# Import PhoneValidator (always available, independent of database)
+from PhoneValidator import PhoneValidator
 
-# Import database operations and phone validation
-# from db import (
-#     DatabaseOperations,
-#     PhoneValidator,
-#     db_pool,
-#     initialize_db_pool,
-#     close_db_pool
-# )
-import db
-from db import (DatabaseOperations, PhoneValidator)
+# Test mode flag - when True, uses mock API keys instead of database
+TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
+
+# Consent checking flag - when True, rejects submissions with False consent values
+CHECK_CONSENTS = os.getenv("CHECK_CONSENTS", "true").lower() == "true"
+
+# Import database operations conditionally (only if not in test mode)
+if not TEST_MODE:
+    try:
+        import db
+        from db import DatabaseOperations
+    except ImportError as e:
+        logger.error(f"Database module import failed: {e}")
+        logger.error("If running in test mode, set TEST_MODE=true environment variable")
+        raise
+else:
+    # Mock objects for test mode
+    db = None
+    DatabaseOperations = None
 
 # Configure logging
 logging.basicConfig(
@@ -36,6 +48,18 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Mock API keys for testing (only used when TEST_MODE=true)
+MOCK_API_KEYS = {
+    "pk_test_123": {
+        "secret_key": "sk_test_secret_key_demo_only_change_in_prod",
+        "company_id": "2",
+        "api_key_id": 1,
+        "company_active": True,
+        "api_key_active": True,
+        "api_key_expires_at": None
+    }
+}
 
 
 # ============================================================================
@@ -59,7 +83,37 @@ class SurveyRequest(BaseModel):
     def validate_email(cls, v):
         if not v or not v.strip():
             raise ValueError('Email is required and cannot be empty')
-        return v.strip().lower()
+        
+        # Normalize email
+        email = v.strip().lower()
+        
+        # Basic format validation (EmailStr already does this, but be explicit)
+        if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
+            raise ValueError('Invalid email format')
+        
+        # Reject common invalid patterns
+        if email.startswith('.') or email.endswith('.'):
+            raise ValueError('Email cannot start or end with a period')
+        
+        if '..' in email:
+            raise ValueError('Email cannot contain consecutive periods')
+        
+        # Reject disposable/temporary email domains (common ones)
+        disposable_domains = [
+            'tempmail.com', 'throwaway.email', '10minutemail.com',
+            'guerrillamail.com', 'mailinator.com', 'trashmail.com',
+            'yopmail.com', 'fakeinbox.com', 'temp-mail.org'
+        ]
+        domain = email.split('@')[1] if '@' in email else ''
+        if domain in disposable_domains:
+            raise ValueError('Disposable email addresses are not accepted')
+        
+        # Reject emails with no domain extension or single character domains
+        domain_parts = domain.split('.')
+        if len(domain_parts) < 2 or len(domain_parts[-1]) < 2:
+            raise ValueError('Invalid email domain')
+        
+        return email
     
     @validator('name', 'businessName')
     def validate_required_string(cls, v):
@@ -91,6 +145,18 @@ class IntakeResponse(BaseModel):
     status: str = "accepted"
 
 
+class LeadStatusResponse(BaseModel):
+    """Response model for lead status query"""
+    company_id: str
+    submission_id: str
+    call_summary: str
+
+
+class LeadStatusNotFoundResponse(BaseModel):
+    """Response when lead status is not found"""
+    error: str = "not_found"
+
+
 class ErrorDetail(BaseModel):
     """Structured error response"""
     code: str
@@ -109,29 +175,18 @@ class ErrorResponse(BaseModel):
 # ============================================================================
 
 class InMemoryStore:
-    """Thread-safe in-memory storage for demo purposes"""
+    """
+    Thread-safe in-memory storage for caching and rate limiting
+    
+    Note: API keys are now stored in the database (api_keys and companies tables).
+    This class only maintains runtime caches for:
+    - Nonce replay protection
+    - Idempotency tracking
+    - Rate limiting
+    - Submission metadata
+    """
     
     def __init__(self):
-        # Company registry: public_key_id -> {secret_key, company_id}
-        # Load HMAC secrets from environment variables (K8s secrets)
-        # Fallback to hardcoded values for local development/testing
-        self.companies: Dict[str, Dict[str, str]] = {
-            "pk_test_123": {
-                "secret_key": os.getenv(
-                    "HMAC_SECRET_KEY_PK_TEST_123",
-                    "sk_test_secret_key_demo_only_change_in_prod"
-                ),
-                "company_id": "cmp_123"
-            },
-            "pk_test_456": {
-                "secret_key": os.getenv(
-                    "HMAC_SECRET_KEY_PK_TEST_456",
-                    "sk_test_another_secret_key_for_testing"
-                ),
-                "company_id": "cmp_456"
-            }
-        }
-        
         # Nonce cache: stores nonce -> expiry_timestamp for 2h
         self.nonce_cache: Dict[str, float] = {}
         
@@ -195,14 +250,18 @@ async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
     logger.info("Starting Ardent Intake API...")
     
-    # Initialize database connection pool
-    db.initialize_db_pool()
+    if TEST_MODE:
+        logger.info("TEST MODE ENABLED - Using mock API keys, no database required")
+    else:
+        # Initialize database connection pool
+        db.initialize_db_pool()
     
     yield
     
     # Shutdown
     logger.info("Shutting down Ardent Intake API...")
-    db.close_db_pool()
+    if not TEST_MODE and db:
+        db.close_db_pool()
 
 
 # ============================================================================
@@ -322,7 +381,7 @@ async def verify_hmac_auth(
     company_id: str = Header(..., alias="X-Ardent-Company")
 ) -> Dict[str, str]:
     """
-    Dependency to verify HMAC authentication
+    Dependency to verify HMAC authentication with database-backed API key validation
     Returns company info if valid, raises HTTPException otherwise
     """
     request_id = getattr(request.state, "request_id", "unknown")
@@ -335,8 +394,44 @@ async def verify_hmac_auth(
         nonce = auth_params["nonce"]
         provided_sig = auth_params["sig"]
         
-        # Verify company exists
-        if public_key_id not in store.companies:
+        # Check database availability (skip in test mode)
+        if not TEST_MODE and (db is None or db.db_pool is None):
+            logger.error(f"[{request_id}] Database not available for authentication")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "error": {
+                        "code": "database_unavailable",
+                        "message": "Authentication service unavailable",
+                        "request_id": request_id,
+                        "retryable": True
+                    }
+                }
+            )
+        
+        # Fetch API key from database or mock (test mode)
+        if TEST_MODE:
+            logger.info(f"[{request_id}] TEST MODE: Using mock API keys")
+            api_key_info = MOCK_API_KEYS.get(public_key_id)
+        else:
+            try:
+                api_key_info = DatabaseOperations.get_api_key_by_public_key(public_key_id)
+            except Exception as db_error:
+                logger.error(f"[{request_id}] Database error fetching API key: {str(db_error)}")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={
+                        "error": {
+                            "code": "database_error",
+                            "message": "Authentication service error",
+                            "request_id": request_id,
+                            "retryable": True
+                        }
+                    }
+                )
+        
+        # Verify API key exists
+        if api_key_info is None:
             logger.warning(f"[{request_id}] Unknown public key: {public_key_id}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -350,9 +445,57 @@ async def verify_hmac_auth(
                 }
             )
         
-        company_info = store.companies[public_key_id]
-        secret_key = company_info["secret_key"]
-        expected_company_id = company_info["company_id"]
+        # Verify company is active
+        if not api_key_info.get('company_active', False):
+            logger.warning(f"[{request_id}] Inactive company for key: {public_key_id}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "error": {
+                        "code": "company_inactive",
+                        "message": "Company account is inactive",
+                        "request_id": request_id,
+                        "retryable": False
+                    }
+                }
+            )
+        
+        # Verify API key is active
+        if not api_key_info.get('api_key_active', False):
+            logger.warning(f"[{request_id}] Inactive API key: {public_key_id}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "error": {
+                        "code": "api_key_inactive",
+                        "message": "API key is inactive",
+                        "request_id": request_id,
+                        "retryable": False
+                    }
+                }
+            )
+        
+        # Verify API key has not expired
+        expires_at = api_key_info.get('api_key_expires_at')
+        if expires_at is not None:
+            from datetime import datetime, timezone
+            if datetime.now(timezone.utc) > expires_at:
+                logger.warning(f"[{request_id}] Expired API key: {public_key_id}")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail={
+                        "error": {
+                            "code": "api_key_expired",
+                            "message": "API key has expired",
+                            "request_id": request_id,
+                            "retryable": False
+                        }
+                    }
+                )
+        
+        secret_key = api_key_info['secret_key']
+        expected_company_id = str(api_key_info['company_id'])
+        api_key_id = api_key_info['api_key_id']
         
         # Verify X-Ardent-Company matches the key's company
         if company_id != expected_company_id:
@@ -480,6 +623,14 @@ async def verify_hmac_auth(
         
         logger.info(f"[{request_id}] HMAC authentication successful for company {company_id}")
         
+        # Update last_used_at timestamp asynchronously (non-blocking) - skip in test mode
+        if not TEST_MODE:
+            try:
+                DatabaseOperations.update_api_key_last_used(api_key_id)
+            except Exception as e:
+                # Log but don't fail authentication if timestamp update fails
+                logger.warning(f"[{request_id}] Failed to update last_used_at: {str(e)}")
+        
         return {
             "company_id": company_id,
             "public_key_id": public_key_id,
@@ -506,6 +657,80 @@ async def verify_hmac_auth(
 # ============================================================================
 # EXCEPTION HANDLERS
 # ============================================================================
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Handle Pydantic validation errors with detailed error messages"""
+    request_id = getattr(request.state, "request_id", "unknown")
+    
+    errors = exc.errors()
+    logger.warning(f"[{request_id}] Validation error: {errors}")
+    
+    # Build detailed validation errors
+    validation_errors = []
+    
+    for error in errors:
+        # Extract field location (e.g., ('body', 'email') -> 'email')
+        field_path = error.get('loc', ())
+        field_name = field_path[-1] if field_path else 'unknown'
+        
+        # Get error message and type
+        error_msg = error.get('msg', 'Validation failed')
+        error_type = error.get('type', 'value_error')
+        
+        # Create user-friendly error messages based on error type
+        if error_type == 'missing':
+            user_message = f"Required field '{field_name}' is missing"
+        elif error_type == 'value_error.missing':
+            user_message = f"Required field '{field_name}' is missing"
+        elif error_type == 'type_error.none.not_allowed':
+            user_message = f"Field '{field_name}' cannot be null"
+        elif 'email' in error_type.lower() or field_name == 'email':
+            # Email validation errors
+            if 'valid email' in error_msg.lower() or 'email' in error_msg.lower():
+                user_message = f"Invalid email format for field '{field_name}'. Email must contain '@' symbol and valid domain (e.g., user@example.com)"
+            else:
+                user_message = f"Email validation failed: {error_msg}"
+        elif field_name == 'phoneNumber':
+            # Phone number validation errors
+            if 'E.164 format' in error_msg:
+                user_message = error_msg
+            else:
+                user_message = f"Phone number validation failed: {error_msg}"
+        elif error_type.startswith('value_error'):
+            # Custom validator errors - use the message directly
+            user_message = f"Validation failed for field '{field_name}': {error_msg}"
+        elif error_type.startswith('type_error'):
+            # Type errors
+            user_message = f"Invalid type for field '{field_name}': {error_msg}"
+        else:
+            # Fallback for other errors
+            user_message = f"Validation failed for field '{field_name}': {error_msg}"
+        
+        validation_errors.append({
+            "field": field_name,
+            "message": user_message
+        })
+    
+    # Create summary message
+    if len(validation_errors) == 1:
+        summary_message = validation_errors[0]["message"]
+    else:
+        summary_message = f"Request validation failed for {len(validation_errors)} field(s)"
+    
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content={
+            "error": {
+                "code": "validation_error",
+                "message": summary_message,
+                "request_id": request_id,
+                "retryable": False,
+                "validation_errors": validation_errors
+            }
+        }
+    )
+
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
@@ -590,8 +815,8 @@ async def intake_lead(
     
     logger.info(f"[{request_id}] Processing survey submission for company {company_id}")
     
-    # Check database availability
-    if db.db_pool is None:
+    # Check database availability (skip in test mode)
+    if not TEST_MODE and db.db_pool is None:
         logger.error(f"[{request_id}] Database not available")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -662,26 +887,91 @@ async def intake_lead(
     
     logger.info(f"[PHONE_VALIDATION] Result: {phone_validation}")
     
-    # Insert into database with retry logic
-    try:
-        customer_id = DatabaseOperations.insert_customer_and_survey(survey, phone_validated)
-        logger.info(f"[{request_id}] Survey stored in PostgreSQL, customer_id: {customer_id}")
-    except Exception as db_error:
-        logger.error(f"[{request_id}] Database operation failed after retries: {str(db_error)}")
+    # REJECT request if phone number is invalid - DO NOT write to database
+    if not phone_validated:
+        logger.warning(
+            f"[{request_id}] Rejecting request due to invalid phone number: {phone_validation['reason']}"
+        )
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "error": {
-                    "code": "database_error",
-                    "message": "Failed to store survey data after retries",
+                    "code": "validation_error",
+                    "message": f"Phone number validation failed: {phone_validation['reason']}",
                     "request_id": request_id,
-                    "retryable": True
+                    "retryable": False,
+                    "validation_errors": [{
+                        "field": "phoneNumber",
+                        "message": phone_validation['reason']
+                    }]
                 }
             }
         )
     
-    # Generate submission ID
+    # Check consents if enabled
+    if CHECK_CONSENTS:
+        consent_errors = []
+        
+        if not survey.privacyConsent:
+            consent_errors.append({
+                "field": "privacyConsent",
+                "message": "Privacy consent must be True. User must agree to privacy policy."
+            })
+        
+        if not survey.consentToUseAI:
+            consent_errors.append({
+                "field": "consentToUseAI",
+                "message": "AI usage consent must be True. User must agree to AI processing."
+            })
+        
+        if consent_errors:
+            logger.warning(f"[{request_id}] Rejecting request due to missing consents")
+            error_message = "Consent validation failed: "
+            if len(consent_errors) == 1:
+                error_message += consent_errors[0]["message"]
+            else:
+                error_message += f"{len(consent_errors)} consent(s) required but not granted"
+            
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": {
+                        "code": "validation_error",
+                        "message": error_message,
+                        "request_id": request_id,
+                        "retryable": False,
+                        "validation_errors": consent_errors
+                    }
+                }
+            )
+    
+    # Generate submission ID before database call
     submission_id = f"sub_{secrets.token_urlsafe(20)}"
+    
+    # Insert into database with retry logic (or use mock in test mode)
+    if TEST_MODE:
+        # Mock customer_id in test mode
+        customer_id = int(time.time()) % 1000000
+        logger.info(f"[{request_id}] TEST MODE: Mock survey storage, customer_id: {customer_id}")
+    else:
+        try:
+            customer_id = DatabaseOperations.insert_customer_and_survey(survey, phone_validated, submission_id, company_id)
+            logger.info(f"[{request_id}] Survey stored in PostgreSQL, customer_id: {customer_id}")
+        except Exception as db_error:
+            logger.error(f"[{request_id}] Database operation failed after retries: {str(db_error)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "error": {
+                        "code": "database_error",
+                        "message": "Failed to store survey data after retries",
+                        "request_id": request_id,
+                        "retryable": True
+                    }
+                }
+            )
+    
+    # Generate received_at timestamp
     received_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     
     # Store submission metadata in-memory for idempotency tracking
@@ -713,6 +1003,189 @@ async def intake_lead(
     )
 
 
+@app.get("/api/v1/lead-status")
+async def get_lead_status(
+    request: Request,
+    company_id: str,
+    submission_id: str,
+    auth_info: Dict[str, str] = Depends(verify_hmac_auth)
+):
+    """
+    Get lead status by company_id and submission_id with HMAC authentication
+    
+    Query Parameters:
+    - company_id: Company identifier (must match authenticated company)
+    - submission_id: Unique submission identifier
+    
+    Security:
+    - HMAC-SHA256 signature verification (same as POST endpoint)
+    - Timestamp validation (±300s)
+    - Nonce replay protection
+    
+    Returns:
+    - 200: Lead status with call_summary
+    - 400: Bad request (missing parameters)
+    - 401: Unauthorized (invalid signature/headers)
+    - 404: Lead not found
+    - 503: Database unavailable
+    """
+    request_id = request.state.request_id
+    authenticated_company_id = auth_info["company_id"]
+    
+    logger.info(f"[{request_id}] Querying lead status for company {company_id}, submission {submission_id}")
+    
+    # Validate query parameters
+    if not company_id or not submission_id:
+        logger.warning(f"[{request_id}] Missing required query parameters")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": {
+                    "code": "missing_parameters",
+                    "message": "Both company_id and submission_id are required",
+                    "request_id": request_id,
+                    "retryable": False
+                }
+            }
+        )
+    
+    # Verify company_id matches authenticated company
+    if company_id != authenticated_company_id:
+        logger.warning(f"[{request_id}] Company ID mismatch: {company_id} != {authenticated_company_id}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "error": {
+                    "code": "company_mismatch",
+                    "message": "Query parameter company_id does not match authenticated company",
+                    "request_id": request_id,
+                    "retryable": False
+                }
+            }
+        )
+    
+    # Check database availability (skip in test mode)
+    if not TEST_MODE and db.db_pool is None:
+        logger.error(f"[{request_id}] Database not available")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": {
+                    "code": "database_unavailable",
+                    "message": "Database not configured or unavailable",
+                    "request_id": request_id,
+                    "retryable": True
+                }
+            }
+        )
+    
+    # Query database for lead status (or use mock in test mode)
+    if TEST_MODE:
+        # Mock response in test mode - check in-memory store
+        if submission_id in store.submissions:
+            logger.info(f"[{request_id}] TEST MODE: Lead found in memory")
+            return LeadStatusResponse(
+                company_id=company_id,
+                submission_id=submission_id,
+                call_summary="call result is being processed"
+            )
+        else:
+            logger.info(f"[{request_id}] TEST MODE: Lead not found")
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"error": "not_found"}
+            )
+    else:
+        try:
+            result = DatabaseOperations.get_lead_status(company_id, submission_id)
+            
+            if result is None:
+                logger.info(f"[{request_id}] Lead not found: {company_id}/{submission_id}")
+                return JSONResponse(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    content={"error": "not_found"}
+                )
+            
+            # Check if call is being processed
+            call_summary = result.get('call_summary')
+            processed = result.get('processed', False)
+            
+            if not processed and (call_summary is None or call_summary == ''):
+                call_summary = "call result is being processed"
+            
+            logger.info(f"[{request_id}] Lead status retrieved successfully")
+            
+            return LeadStatusResponse(
+                company_id=company_id,
+                submission_id=submission_id,
+                call_summary=call_summary or ""
+            )
+            
+        except Exception as db_error:
+            logger.error(f"[{request_id}] Database query failed: {str(db_error)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "error": {
+                        "code": "database_error",
+                        "message": "Failed to retrieve lead status",
+                        "request_id": request_id,
+                        "retryable": True
+                    }
+                }
+            )
+
+
+@app.get("/api/v1/lead-status/health")
+async def lead_status_health_check():
+    """
+    Health check endpoint for lead-status service
+    
+    Checks:
+    - Service status
+    - Database connection (if configured)
+    """
+    try:
+        health_status = {
+            "status": "healthy",
+            "service": "ardent-lead-status-api",
+            "version": "1.0.0",
+            "test_mode": TEST_MODE
+        }
+        
+        # Check database if available (skip in test mode)
+        if TEST_MODE:
+            health_status["database"] = "test_mode_mock"
+        elif db.db_pool:
+            try:
+                conn = DatabaseOperations.get_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1")
+                cursor.close()
+                DatabaseOperations.release_connection(conn)
+                health_status["database"] = "connected"
+            except Exception as db_error:
+                logger.error(f"Database health check failed: {str(db_error)}")
+                health_status["database"] = "error"
+                health_status["status"] = "degraded"
+        else:
+            health_status["database"] = "not_configured"
+        
+        return health_status
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "status": "unhealthy",
+                "service": "ardent-lead-status-api",
+                "version": "1.0.0",
+                "error": str(e)
+            }
+        )
+
+
 @app.get("/api/v1/leads/health")
 async def health_check():
     """
@@ -726,11 +1199,14 @@ async def health_check():
         health_status = {
             "status": "healthy",
             "service": "ardent-intake-api",
-            "version": "1.0.0"
+            "version": "1.0.0",
+            "test_mode": TEST_MODE
         }
         
-        # Check database if available
-        if db.db_pool:
+        # Check database if available (skip in test mode)
+        if TEST_MODE:
+            health_status["database"] = "test_mode_mock"
+        elif db.db_pool:
             try:
                 conn = DatabaseOperations.get_connection()
                 cursor = conn.cursor()

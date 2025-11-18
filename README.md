@@ -47,6 +47,9 @@ POSTGRES_PASSWORD=your_secure_password
 # Phone Validation
 INTERNATIONAL_NUMBERS_ALLOWED=false
 
+# Consent Validation
+CHECK_CONSENTS=true
+
 # Application
 PORT=8000
 ```
@@ -136,8 +139,11 @@ Idempotency-Key: <unique_string>
 - `email` - Valid email address (cannot be empty)
 - `name` - Customer name (cannot be empty)
 - `phoneNumber` - E.164 format (e.g., +12045551234)
-- `businessType` - Type of business (cannot be empty)
-- `privacyConsent` - Must be `true`
+- `businessName` - Business name (cannot be empty)
+- `privacyConsent` - Must be `true` (if CHECK_CONSENTS=true)
+- `consentToUseAI` - Must be `true` (if CHECK_CONSENTS=true)
+
+**Note:** If `CHECK_CONSENTS=false`, submissions with `privacyConsent: false` or `consentToUseAI: false` will be accepted.
 
 All other fields are optional.
 
@@ -160,9 +166,51 @@ All other fields are optional.
 {
   "error": {
     "code": "validation_error",
-    "message": "Phone number is required and cannot be empty",
+    "message": "Invalid email format for field 'email'. Email must contain '@' symbol and valid domain (e.g., user@example.com)",
     "request_id": "req_abc123",
-    "retryable": false
+    "retryable": false,
+    "validation_errors": [
+      {
+        "field": "email",
+        "message": "Invalid email format for field 'email'. Email must contain '@' symbol and valid domain (e.g., user@example.com)"
+      }
+    ]
+  }
+}
+```
+
+**400 Bad Request** (Missing Consent):
+```json
+{
+  "error": {
+    "code": "validation_error",
+    "message": "Privacy consent must be True. User must agree to privacy policy.",
+    "request_id": "req_abc123",
+    "retryable": false,
+    "validation_errors": [
+      {
+        "field": "privacyConsent",
+        "message": "Privacy consent must be True. User must agree to privacy policy."
+      }
+    ]
+  }
+}
+```
+
+**400 Bad Request** (Invalid Phone Number):
+```json
+{
+  "error": {
+    "code": "validation_error",
+    "message": "Phone number must be in E.164 format (e.g., +12125551234)",
+    "request_id": "req_abc123",
+    "retryable": false,
+    "validation_errors": [
+      {
+        "field": "phoneNumber",
+        "message": "Phone number must be in E.164 format (e.g., +12125551234)"
+      }
+    ]
   }
 }
 ```
@@ -315,7 +363,26 @@ Database values:
 
 ## Testing
 
-### Test with Python
+### Quick Test with Test Mode
+
+For quick testing without PostgreSQL, use the included test script:
+
+```bash
+# Run tests in test mode (no database required)
+./run_tests.sh
+```
+
+This will:
+1. Start the API in TEST_MODE (uses mock API keys)
+2. Run all test scenarios from `test_client.py`
+3. Automatically shut down the server
+
+**Test Configuration:**
+- Company ID: `2`
+- Public Key: `pk_test_123`
+- Secret Key: `sk_test_secret_key_demo_only_change_in_prod`
+
+### Manual Tests with Python
 
 ```python
 import requests
@@ -365,9 +432,23 @@ print(response.status_code)
 print(response.json())
 ```
 
-### Run Test Client
+### Run Test Client (Requires Database)
 
 ```bash
+# Start server with PostgreSQL
+uvicorn main:app --reload
+
+# In another terminal, run tests
+python test_client.py
+```
+
+### Run Test Client in Test Mode (No Database)
+
+```bash
+# Start server in test mode
+TEST_MODE=true uvicorn main:app --reload
+
+# In another terminal, run tests
 python test_client.py
 ```
 
@@ -375,6 +456,18 @@ python test_client.py
 
 ```bash
 pytest test_api.py -v
+```
+
+### Test Mode Environment Variable
+
+Set `TEST_MODE=true` to enable test mode:
+- Uses mock API keys (no database authentication lookup)
+- Stores submissions in memory only
+- Perfect for development and CI/CD testing
+
+```bash
+# .env file
+TEST_MODE=true
 ```
 
 ## Kubernetes Deployment
