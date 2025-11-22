@@ -5,7 +5,7 @@ Database configuration and operations for Ardent Survey API
 import logging
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 import psycopg2
 from psycopg2 import pool, extras, Error
@@ -199,6 +199,50 @@ class DatabaseOperations:
                     if result:
                         return dict(result)
                     return None
+            
+            finally:
+                if conn:
+                    DatabaseOperations.release_connection(conn)
+        
+        return DatabaseOperations.retry_operation(_perform_query, max_retries=3)
+
+    @staticmethod
+    def get_leads(company_id: str, start_date, end_date) -> List[Dict[str, Any]]:
+        """
+        Retrieve leads for a company within a date range.
+        
+        Args:
+            company_id: Company identifier
+            start_date: Start datetime (inclusive), timezone-aware
+            end_date: End datetime (inclusive), timezone-aware
+        
+        Returns:
+            List of lead dictionaries containing customer and survey fields
+        """
+        def _perform_query():
+            conn = None
+            try:
+                conn = DatabaseOperations.get_connection()
+                with conn.cursor(cursor_factory=extras.RealDictCursor) as cursor:
+                    cursor.execute("""
+                        SELECT
+                            c.name AS customer_name,
+                            c.email,
+                            c.phone_number,
+                            sr.processed,
+                            sr.call_summary,
+                            sr.transcript,
+                            sr.created_at
+                        FROM survey_responses sr
+                        INNER JOIN customers c ON sr.customer_id = c.id
+                        WHERE sr.company_id = %s
+                          AND sr.created_at >= %s
+                          AND sr.created_at <= %s
+                        ORDER BY sr.created_at ASC
+                    """, (company_id, start_date, end_date))
+                    
+                    results = cursor.fetchall()
+                    return [dict(row) for row in results] if results else []
             
             finally:
                 if conn:

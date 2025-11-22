@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: ardent-intake-api
-          image: ivansscrobot/ardent-leads-api:0.4
+          image: ivansscrobot/ardent-leads-api:0.7
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000

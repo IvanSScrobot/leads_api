@@ -10,7 +10,7 @@ import hmac
 import json
 import time
 import uuid
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch, MagicMock, ANY
 from datetime import datetime, timezone, timedelta
 import pytest
 import logging
@@ -447,6 +447,86 @@ class TestLeadStatusEndpoint:
             assert response.status_code == 404
             data = response.json()
             assert data["error"] == "not_found"
+
+
+class TestGetLeadsEndpoint:
+    """Test GET /api/v1/get-leads endpoint"""
+    
+    def test_successful_get_leads(self, mock_db_pool, mock_api_key_lookup, mock_api_key_update):
+        """Test successful retrieval of leads within date range"""
+        company_id = TEST_COMPANY_ID
+        start_date = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        end_date = datetime.now(timezone.utc).isoformat()
+        
+        db_results = [
+            {
+                "customer_name": "Alice",
+                "email": "alice@example.com",
+                "phone_number": "+15550000001",
+                "processed": True,
+                "call_summary": "Interested in solar panels",
+                "transcript": "Call transcript 1"
+            },
+            {
+                "customer_name": "Bob",
+                "email": "bob@example.com",
+                "phone_number": "+15550000002",
+                "processed": False,
+                "call_summary": "Initial notes",
+                "transcript": ""
+            },
+            {
+                "customer_name": "Cara",
+                "email": "cara@example.com",
+                "phone_number": "+15550000003",
+                "processed": False,
+                "call_summary": "",
+                "transcript": ""
+            }
+        ]
+        
+        with patch.object(DatabaseOperations, 'get_leads') as mock_get_leads:
+            mock_get_leads.return_value = db_results
+            
+            headers = generate_hmac_signature_for_get(
+                "GET",
+                "/api/v1/get-leads",
+                company_id
+            )
+            
+            response = client.get(
+                f"/api/v1/get-leads?company_id={company_id}&start_date={start_date}&end_date={end_date}",
+                headers=headers
+            )
+            
+            assert response.status_code == 200
+            data = response.json()
+            assert len(data) == 3
+            assert data[0]["status"] == "ready"
+            assert data[1]["status"] == "being processed"
+            assert data[2]["status"] == "new"
+            mock_get_leads.assert_called_once_with(company_id, ANY, ANY)
+    
+    def test_start_date_in_future(self, mock_db_pool, mock_api_key_lookup, mock_api_key_update):
+        """start_date in the future should return 400"""
+        company_id = TEST_COMPANY_ID
+        start_date = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        end_date = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+        
+        headers = generate_hmac_signature_for_get(
+            "GET",
+            "/api/v1/get-leads",
+            company_id
+        )
+        
+        response = client.get(
+            f"/api/v1/get-leads?company_id={company_id}&start_date={start_date}&end_date={end_date}",
+            headers=headers
+        )
+        
+        assert response.status_code == 400
+        data = response.json()
+        assert data["error"]["code"] == "invalid_date_range"
 
 
 if __name__ == "__main__":
