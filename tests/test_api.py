@@ -17,8 +17,10 @@ import logging
 from fastapi.testclient import TestClient
 
 # Import the app and dependencies
-from main import app, store
-from db import DatabaseOperations, PhoneValidator
+from main import app
+from lib.db import DatabaseOperations
+from lib.phone_validator import PhoneValidator
+from lib.store import store
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -116,7 +118,7 @@ def get_valid_survey_payload():
 @pytest.fixture
 def mock_db_pool():
     """Mock database pool"""
-    with patch('main.db.db_pool') as mock_pool:
+    with patch('lib.db.db_pool') as mock_pool:
         mock_pool.__bool__ = Mock(return_value=True)
         yield mock_pool
 
@@ -337,7 +339,7 @@ class TestDatabase:
     
     def test_database_unavailable(self):
         """Test request when database is not available"""
-        with patch('main.db.db_pool', None):
+        with patch('lib.db.db_pool', None):
             payload = get_valid_survey_payload()
             headers = generate_hmac_signature("POST", "/api/v1/leads", TEST_COMPANY_ID, payload)
             

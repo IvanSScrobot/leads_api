@@ -4,13 +4,8 @@ Tests the validation logic without requiring database dependencies
 """
 
 import re
-import sys
-import os
 
-# Add the leads_api directory to the path to import PhoneValidator
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from PhoneValidator import PhoneValidator
+from lib.phone_validator import PhoneValidator
 
 
 # ============================================================================

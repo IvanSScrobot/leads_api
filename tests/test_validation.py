@@ -3,15 +3,10 @@ Test script for phone and email validation in leads_api
 Tests the enhanced validation logic to ensure invalid numbers and emails are rejected
 """
 
-import sys
-import os
-
-# Add the leads_api directory to the path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from db import PhoneValidator
-from main import SurveyRequest
 from pydantic import ValidationError
+
+from lib.phone_validator import PhoneValidator
+from lib.schemas import SurveyRequest
 
 def test_phone_validation():
     """Test phone number validation"""

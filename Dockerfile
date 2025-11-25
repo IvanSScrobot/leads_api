@@ -26,6 +26,7 @@ RUN useradd -m -u 1000 appuser
 COPY --from=builder /root/.local /home/appuser/.local
 
 # Copy application code
+COPY src ./src
 COPY *.py .
 
 # Set ownership
@@ -36,6 +37,8 @@ USER appuser
 
 # Update PATH to include local pip packages for appuser
 ENV PATH=/home/appuser/.local/bin:$PATH
+# Ensure src is on PYTHONPATH
+ENV PYTHONPATH=/app/src
 
 # Expose port
 EXPOSE 8000
@@ -45,4 +48,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/leads/health')" || exit 1
 
 # Run the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]

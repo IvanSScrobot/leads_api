@@ -83,8 +83,8 @@ CREATE TABLE survey_responses (
 ## Running the API
 
 ```bash
-# Start the server
-uvicorn main:app --reload
+# Start the server (from repo root)
+uvicorn src.main:app --reload
 
 # Server will start at http://localhost:8000
 ```
@@ -436,20 +436,20 @@ print(response.json())
 
 ```bash
 # Start server with PostgreSQL
-uvicorn main:app --reload
+uvicorn src.main:app --reload
 
 # In another terminal, run tests
-python test_client.py
+python -m pytest tests/test_client.py
 ```
 
 ### Run Test Client in Test Mode (No Database)
 
 ```bash
 # Start server in test mode
-TEST_MODE=true uvicorn main:app --reload
+TEST_MODE=true uvicorn src.main:app --reload
 
 # In another terminal, run tests
-python test_client.py
+python -m pytest tests/test_client.py
 ```
 
 ### Run Pytest

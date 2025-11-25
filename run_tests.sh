@@ -23,7 +23,7 @@ export TEST_MODE=true
 
 # Start the server in the background
 echo "Starting server..."
-venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 &
+venv/bin/uvicorn src.main:app --host 0.0.0.0 --port 8000 &
 SERVER_PID=$!
 
 # Wait for server to start
@@ -42,7 +42,7 @@ echo ""
 # Run tests
 echo "Running tests..."
 echo "================================================"
-venv/bin/python test_client.py
+venv/bin/pytest tests
 
 # Store test exit code
 TEST_EXIT_CODE=$?
