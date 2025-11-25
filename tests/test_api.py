@@ -462,28 +462,34 @@ class TestGetLeadsEndpoint:
         
         db_results = [
             {
+                "id": 1,
                 "customer_name": "Alice",
                 "email": "alice@example.com",
                 "phone_number": "+15550000001",
                 "processed": True,
                 "call_summary": "Interested in solar panels",
-                "transcript": "Call transcript 1"
+                "transcript": "Call transcript 1",
+                "created_at": datetime.now(timezone.utc).isoformat()
             },
             {
+                "id": 2,
                 "customer_name": "Bob",
                 "email": "bob@example.com",
                 "phone_number": "+15550000002",
                 "processed": False,
                 "call_summary": "Initial notes",
-                "transcript": ""
+                "transcript": "",
+                "created_at": datetime.now(timezone.utc).isoformat()
             },
             {
+                "id": 3,
                 "customer_name": "Cara",
                 "email": "cara@example.com",
                 "phone_number": "+15550000003",
                 "processed": False,
                 "call_summary": "",
-                "transcript": ""
+                "transcript": "",
+                "created_at": datetime.now(timezone.utc).isoformat()
             }
         ]
         
@@ -500,10 +506,12 @@ class TestGetLeadsEndpoint:
                 f"/api/v1/get-leads?company_id={company_id}&start_date={start_date}&end_date={end_date}",
                 headers=headers
             )
-            
+
             assert response.status_code == 200
             data = response.json()
             assert len(data) == 3
+            assert data[0]["id"] == 1
+            assert "created_at" in data[0]
             assert data[0]["status"] == "ready"
             assert data[1]["status"] == "being processed"
             assert data[2]["status"] == "new"

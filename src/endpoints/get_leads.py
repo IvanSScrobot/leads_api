@@ -119,10 +119,12 @@ async def get_leads(
 
         formatted_leads.append(
             LeadRecord(
+                id=lead.get("id"),
                 customer_name=lead.get("customer_name") or "",
                 email=lead.get("email") or "",
                 phone_number=lead.get("phone_number") or "",
                 status=status_value,
+                created_at=lead.get("created_at"),
                 call_summary=call_summary,
                 transcript=transcript,
             )

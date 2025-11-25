@@ -1,25 +1,25 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ardent-intake-api
+  name: ardent-leads-api
   namespace: default
   labels:
-    app: ardent-intake-api
+    app: ardent-leads-api
     version: v1
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: ardent-intake-api
+      app: ardent-leads-api
   template:
     metadata:
       labels:
-        app: ardent-intake-api
+        app: ardent-leads-api
         version: v1
     spec:
       containers:
-        - name: ardent-intake-api
-          image: ivansscrobot/ardent-leads-api:0.7
+        - name: ardent-leads-api
+          image: ivansscrobot/ardent-leads-api:0.7.2
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
