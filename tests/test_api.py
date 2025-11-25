@@ -509,13 +509,18 @@ class TestGetLeadsEndpoint:
 
             assert response.status_code == 200
             data = response.json()
-            assert len(data) == 3
-            assert data[0]["id"] == 1
-            assert "created_at" in data[0]
-            assert data[0]["status"] == "ready"
-            assert data[1]["status"] == "being processed"
-            assert data[2]["status"] == "new"
-            mock_get_leads.assert_called_once_with(company_id, ANY, ANY)
+            assert len(data["items"]) == 3
+            assert data["items"][0]["id"] == 1
+            assert "created_at" in data["items"][0]
+            assert data["items"][0]["status"] == "ready"
+            assert data["items"][1]["status"] == "being processed"
+            assert data["items"][2]["status"] == "new"
+            assert data["has_more"] in [True, False]
+            assert "next_cursor" in data
+            mock_get_leads.assert_called_once()
+            kwargs = mock_get_leads.call_args.kwargs
+            assert kwargs["company_id"] == company_id
+            assert kwargs["cursor_created_at"] is None or isinstance(kwargs["cursor_created_at"], str) or hasattr(kwargs["cursor_created_at"], "isoformat")
     
     def test_start_date_in_future(self, mock_db_pool, mock_api_key_lookup, mock_api_key_update):
         """start_date in the future should return 400"""

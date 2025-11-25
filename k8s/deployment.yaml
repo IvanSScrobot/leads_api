@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: ardent-leads-api
-          image: ivansscrobot/ardent-leads-api:0.7.2
+          image: ivansscrobot/ardent-leads-api:0.7.3
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
@@ -62,6 +62,11 @@ spec:
             # Optional: Phone validation configuration
             - name: INTERNATIONAL_NUMBERS_ALLOWED
               value: "false"
+            - name: GET_LEADS_DEFAULT_LIMIT
+              valueFrom:
+                configMapKeyRef:
+                  name: ardent-leads-config
+                  key: GET_LEADS_DEFAULT_LIMIT
           resources:
             requests:
               memory: "128Mi"
